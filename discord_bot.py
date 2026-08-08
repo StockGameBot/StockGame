@@ -19,6 +19,7 @@ from discord import app_commands
 from discord.ui import Button, View
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
+import pytz
 
 # LOCAL
 from helpers.datatype_validation import GameLeaderboard
@@ -2313,6 +2314,10 @@ class UserLeaderboardView(discord.ui.View):
             description=game.get("description"),
             color=discord.Color.blurple(),
         )
+        notice = _prestart_notice(game.get("game"))
+        if notice:
+            existing = embed.description or ""
+            embed.description = f"{notice}\n{existing}" if existing else notice
         footer_parts = []
         if self.show_game_controls:
             footer_parts.append(f"Game {self.game_index + 1} of {len(self.games)}")
@@ -2500,6 +2505,37 @@ async def _build_rank_page(
         "rank_start": rank_start,
         "rank_end": rank_end,
     }
+
+
+def _first_buy_approx_unix(game) -> int:
+    """Unix timestamp for the approximate first purchase on ``game.start_date``.
+
+    Games flip ``open`` → ``active`` on the Eastern calendar start date during the
+    ~15‑minute ``update_all`` loop; pending buys settle once the game is active.
+    We estimate that moment near US equity market open (``GameLogic.market_open_est``,
+    default 09:30 America/New_York).
+    """
+    start = game.start_date
+    if not hasattr(start, "year"):
+        start = datetime.strptime(str(start), "%Y-%m-%d").date()
+    open_clock = fe.gl.market_open_est
+    eastern = pytz.timezone("America/New_York")
+    local = eastern.localize(
+        datetime(start.year, start.month, start.day, open_clock.hour, open_clock.minute)
+    )
+    return int(local.timestamp())
+
+
+def _prestart_notice(game) -> str | None:
+    """Obvious notice for games that have not started (``status == 'open'``)."""
+    if game is None or getattr(game, "status", None) != "open":
+        return None
+    ts = _first_buy_approx_unix(game)
+    return (
+        f"⚠️⚠️ **This game has not started yet.** All stock picks stay **pending** until "
+        f"the first buy settles on the start date: <t:{ts}:f> (~<t:{ts}:R>). "
+        f"Prices will not move until then."
+    )
 
 
 def _leaderboard_game_data(
@@ -2853,15 +2889,17 @@ async def my_stocks(
             if game.pick_date
             else "Buy anytime"
         )
+        notice = _prestart_notice(game)
+        body = (
+            f"Game `{game.id}` · **{status_label}**\n"
+            f"{pick_line}\n"
+            f"Your rank: {rank_line}\n"
+            f"Picks remaining: **{remaining}** / {game.pick_count} "
+            f"(${float(game.start_money) / int(game.pick_count):,.2f} per pick)"
+        )
         embed = discord.Embed(
             title=f"{game.name}",
-            description=(
-                f"Game `{game.id}` · **{status_label}**\n"
-                f"{pick_line}\n"
-                f"Your rank: {rank_line}\n"
-                f"Picks remaining: **{remaining}** / {game.pick_count} "
-                f"(${float(game.start_money) / int(game.pick_count):,.2f} per pick)"
-            ),
+            description=f"{notice}\n\n{body}" if notice else body,
             color=discord.Color.blurple(),
         )
         embed.set_image(url=f"attachment://portfolio_{user_id}_{game_id}.png")
@@ -2885,14 +2923,16 @@ async def my_stocks(
         try:
             remaining, total = await asyncio.to_thread(fe.pick_capacity, user_id, game_id)
             game = (await asyncio.to_thread(fe.game_info, game_id, False)).game
+            notice = _prestart_notice(game)
+            body = (
+                f'You have not bought any stocks in game #{game_id}. '
+                f'Use `/buy-stock` to make your first pick.\n'
+                f'**Picks remaining:** {remaining} of {total}\n'
+                f'**Allocated per pick:** ${float(game.start_money) / total:,.2f}'
+            )
             embed = discord.Embed(
                 title='No Stocks Yet',
-                description=(
-                    f'You have not bought any stocks in game #{game_id}. '
-                    f'Use `/buy-stock` to make your first pick.\n'
-                    f'**Picks remaining:** {remaining} of {total}\n'
-                    f'**Allocated per pick:** ${float(game.start_money) / total:,.2f}'
-                ),
+                description=f"{notice}\n\n{body}" if notice else body,
                 color=discord.Color.blue(),
             )
         except (DoesntExistError, LookupError):
