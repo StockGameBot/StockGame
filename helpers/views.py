@@ -371,8 +371,9 @@ def create_game_leaderboard_image(game_data: Dict[str, Any],
     Returns:
         BytesIO buffer containing the PNG image
     """
-    generator = LeaderboardImageGenerator(theme=theme)
+    generator = get_leaderboard_generator(theme) if theme == "discord_dark" else LeaderboardImageGenerator(theme=theme)
     return generator.create_leaderboard_image(game_data, leaderboard_data)
+
 
 class StockPortfolioImageGenerator:
     """
@@ -787,5 +788,29 @@ def create_portfolio_image(user_data: Dict[str, Any],
     Returns:
         BytesIO buffer containing the PNG image
     """
-    generator = StockPortfolioImageGenerator(theme=theme)
+    generator = get_portfolio_generator(theme) if theme == "discord_dark" else StockPortfolioImageGenerator(theme=theme)
     return generator.create_portfolio_image(user_data, game_data, stock_picks, info=info)
+
+
+_LEADERBOARD_GENERATOR: LeaderboardImageGenerator | None = None
+_PORTFOLIO_GENERATOR: StockPortfolioImageGenerator | None = None
+
+
+def get_leaderboard_generator(theme: str = "discord_dark") -> LeaderboardImageGenerator:
+    """Shared discord_dark leaderboard generator (fonts loaded once)."""
+    global _LEADERBOARD_GENERATOR
+    if theme != "discord_dark":
+        return LeaderboardImageGenerator(theme=theme)
+    if _LEADERBOARD_GENERATOR is None:
+        _LEADERBOARD_GENERATOR = LeaderboardImageGenerator(theme="discord_dark")
+    return _LEADERBOARD_GENERATOR
+
+
+def get_portfolio_generator(theme: str = "discord_dark") -> StockPortfolioImageGenerator:
+    """Shared discord_dark portfolio generator (fonts loaded once)."""
+    global _PORTFOLIO_GENERATOR
+    if theme != "discord_dark":
+        return StockPortfolioImageGenerator(theme=theme)
+    if _PORTFOLIO_GENERATOR is None:
+        _PORTFOLIO_GENERATOR = StockPortfolioImageGenerator(theme="discord_dark")
+    return _PORTFOLIO_GENERATOR

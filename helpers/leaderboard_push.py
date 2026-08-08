@@ -8,6 +8,8 @@ message. Extra messages are deleted when the player count shrinks.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -16,7 +18,7 @@ from typing import Any, Awaitable, Callable, Optional
 import discord
 import pytz
 
-from helpers.recurring_leaderboard_image import RecurringLeaderboardImageGenerator
+from helpers.recurring_leaderboard_image import get_recurring_generator
 
 logger = logging.getLogger("LeaderboardPush")
 
@@ -29,6 +31,9 @@ PUSH_PERMS = (
 
 PUSH_PAGE_SIZE = 5
 PUSH_MAX_PLAYERS = 20
+
+# game_id -> (fingerprint, list of PNG bytes per page)
+_push_image_cache: dict[str, tuple[str, list[bytes]]] = {}
 
 
 def bot_can_push_to_channel(channel: discord.abc.GuildChannel, me: discord.Member) -> bool:
@@ -180,21 +185,92 @@ def chunk_push_players(
     return [trimmed[i : i + page_size] for i in range(0, len(trimmed), page_size)]
 
 
+def _round_float(value: Any, places: int = 4) -> float:
+    try:
+        return round(float(value or 0), places)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def fingerprint_image_rows(
+    game_id: Any,
+    game_name: Any,
+    players: list[dict],
+) -> str:
+    """Stable hash of the data that affects leaderboard PNG pixels."""
+    rows: list[dict[str, Any]] = []
+    for player in players:
+        picks_payload = []
+        for pick in player.get("picks") or []:
+            picks_payload.append(
+                {
+                    "ticker": str(pick.get("ticker") or pick.get("stock_ticker") or ""),
+                    "company": str(pick.get("company") or pick.get("company_name") or ""),
+                    "pct": _round_float(pick.get("change_percent")),
+                }
+            )
+        rows.append(
+            {
+                "user_id": int(player.get("user_id") or 0),
+                "rank": int(player.get("rank") or 0),
+                "display_name": str(player.get("display_name") or ""),
+                "current_value": _round_float(player.get("current_value")),
+                "change_dollars": _round_float(player.get("change_dollars")),
+                "change_percent": _round_float(player.get("change_percent")),
+                "days_in_first": int(player.get("days_in_first") or 0),
+                "picks": picks_payload,
+            }
+        )
+    payload = {
+        "game_id": str(game_id),
+        "game_name": str(game_name),
+        "players": rows,
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def fingerprint_push_pages(game, players: list[dict]) -> str:
+    """Fingerprint for a full push (top 20, ranked across pages)."""
+    ranked: list[dict] = []
+    for page_index, page in enumerate(chunk_push_players(players)):
+        for offset, player in enumerate(page):
+            row = dict(player)
+            row["rank"] = page_index * PUSH_PAGE_SIZE + offset + 1
+            ranked.append(row)
+    return fingerprint_image_rows(game.id, game.name, ranked)
+
+
+def _buffers_from_png_bytes(pngs: list[bytes]) -> list[BytesIO]:
+    return [BytesIO(data) for data in pngs]
+
+
 def render_push_pages(
     game,
     players: list[dict],
     owned_pcts: list[dict],
     *,
     created_at: Optional[datetime] = None,
-) -> tuple[discord.Embed, list[BytesIO]]:
-    """Build the stats embed plus one PNG buffer per leaderboard page."""
+) -> tuple[discord.Embed, list[BytesIO], str, bool]:
+    """Build the stats embed plus one PNG buffer per leaderboard page.
+
+    Returns ``(embed, images, fingerprint, cache_hit)``. On cache hit, ``images``
+    are rebuilt from stored PNG bytes (no Pillow).
+    """
     best = max(owned_pcts, key=lambda x: x["pct"]) if owned_pcts else None
     worst = min(owned_pcts, key=lambda x: x["pct"]) if owned_pcts else None
     embed = build_push_embed(game, best_pick=best, worst_pick=worst)
     stamp = created_at or _et_now()
     game_data = {"name": game.name, "id": game.id}
-    generator = RecurringLeaderboardImageGenerator()
+    fingerprint = fingerprint_push_pages(game, players)
+    cache_key = str(game.id)
+    cached = _push_image_cache.get(cache_key)
+    if cached and cached[0] == fingerprint:
+        return embed, _buffers_from_png_bytes(cached[1]), fingerprint, True
+
+    generator = get_recurring_generator()
     images: list[BytesIO] = []
+    png_bytes: list[bytes] = []
 
     for page_index, page in enumerate(chunk_push_players(players)):
         ranked_page: list[dict] = []
@@ -202,22 +278,37 @@ def render_push_pages(
             row = dict(player)
             row["rank"] = page_index * PUSH_PAGE_SIZE + offset + 1
             ranked_page.append(row)
-        images.append(
-            generator.create_image(
-                game_data,
-                ranked_page,
-                target_n=max(len(ranked_page), 1),
-                show_title=False,
-                created_at=stamp,
-            )
+        buf = generator.create_image(
+            game_data,
+            ranked_page,
+            target_n=max(len(ranked_page), 1),
+            show_title=False,
+            created_at=stamp,
         )
-    return embed, images
+        data = buf.getvalue()
+        png_bytes.append(data)
+        images.append(BytesIO(data))
+
+    _push_image_cache[cache_key] = (fingerprint, png_bytes)
+    return embed, images, fingerprint, False
 
 
 def render_push_payload(game, players: list[dict], owned_pcts: list[dict]) -> tuple[discord.Embed, BytesIO]:
     """Compatibility wrapper: embed plus the first page image."""
-    embed, images = render_push_pages(game, players, owned_pcts)
+    embed, images, _fingerprint, _hit = render_push_pages(game, players, owned_pcts)
     return embed, images[0]
+
+
+def clear_push_image_cache() -> None:
+    """Drop all cached push PNGs (tests / manual reset)."""
+    _push_image_cache.clear()
+
+
+def prune_push_image_cache(keep_game_ids: set[str]) -> None:
+    """Remove push cache entries for games not in the current push set."""
+    for key in list(_push_image_cache):
+        if key not in keep_game_ids:
+            _push_image_cache.pop(key, None)
 
 
 def is_unknown_message_error(exc: BaseException) -> bool:
@@ -395,6 +486,7 @@ async def push_all_recurring_leaderboards(
     except LookupError:
         return
 
+    seen_push_ids: set[str] = set()
     for game in games:
         if not game.template_id:
             continue
@@ -434,11 +526,21 @@ async def push_all_recurring_leaderboards(
                         player["display_name"] = await name_resolver(int(player["user_id"]), guild)
                     except Exception:
                         logger.debug("Name lookup failed for user %s", player["user_id"])
-            embed, images = await asyncio.to_thread(
+            embed, images, _fingerprint, cache_hit = await asyncio.to_thread(
                 render_push_pages, game, players, owned_pcts
             )
             # Refresh game row for message ids
             game = await asyncio.to_thread(fe.be.get_game, game.id)
+            existing_ids = parse_leaderboard_message_ids(
+                getattr(game, "leaderboard_message_id", None)
+            )
+            seen_push_ids.add(str(game.id))
+            if cache_hit and len(existing_ids) == len(images) and existing_ids:
+                logger.debug(
+                    "Skipping push edit for game %s; image fingerprint unchanged",
+                    game.id,
+                )
+                continue
             await push_or_edit_leaderboard_messages(
                 channel=channel,
                 game=game,
@@ -448,3 +550,5 @@ async def push_all_recurring_leaderboards(
             )
         except Exception:
             logger.exception("Recurring leaderboard push failed for game %s", game.id)
+
+    prune_push_image_cache(seen_push_ids)

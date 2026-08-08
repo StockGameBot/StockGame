@@ -440,3 +440,27 @@ class RecurringLeaderboardImageGenerator:
                     fill=self.colors["muted"],
                     font=self.fonts["company"],
                 )
+
+
+_DEFAULT_RECURRING: RecurringLeaderboardImageGenerator | None = None
+_TALL_RECURRING: RecurringLeaderboardImageGenerator | None = None
+_TALL_MAX_HEIGHT = 8000
+
+
+def get_recurring_generator(*, max_height: int | None = None) -> RecurringLeaderboardImageGenerator:
+    """Process-wide generator singleton(s); fonts load once.
+
+    Uses a second instance when ``max_height`` is the tall slash-page budget
+    (``8000``); all other callers share the default instance.
+    """
+    global _DEFAULT_RECURRING, _TALL_RECURRING
+    if max_height == _TALL_MAX_HEIGHT:
+        if _TALL_RECURRING is None:
+            _TALL_RECURRING = RecurringLeaderboardImageGenerator(
+                theme="discord_dark",
+                max_height=_TALL_MAX_HEIGHT,
+            )
+        return _TALL_RECURRING
+    if _DEFAULT_RECURRING is None:
+        _DEFAULT_RECURRING = RecurringLeaderboardImageGenerator()
+    return _DEFAULT_RECURRING
