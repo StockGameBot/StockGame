@@ -189,6 +189,62 @@ def test_game_info_embed_contains_complete_user_facing_configuration():
     assert "Combined value: $31,500.00" in fields["Performance"]
 
 
+def test_prestart_notice_only_for_open_games_uses_discord_timestamps(mocker):
+    import discord_bot as db
+
+    mocker.patch.object(
+        db.fe.gl,
+        "market_open_est",
+        datetime(1900, 1, 1, 9, 30),
+    )
+    open_game = SimpleNamespace(status="open", start_date=date(2026, 8, 2))
+    active_game = SimpleNamespace(status="active", start_date=date(2026, 8, 2))
+
+    assert db._prestart_notice(active_game) is None
+    notice = db._prestart_notice(open_game)
+    assert notice is not None
+    assert notice.startswith("⚠️⚠️")
+    assert "pending" in notice.lower()
+    ts = db._first_buy_approx_unix(open_game)
+    assert f"<t:{ts}:f>" in notice
+    assert f"<t:{ts}:R>" in notice
+
+
+def test_leaderboard_page_payload_prepends_prestart_notice(mocker):
+    import discord_bot as db
+
+    async def run():
+        mocker.patch.object(db, "_prestart_notice", return_value="⚠️⚠️ NOTICE")
+        view = db.UserLeaderboardView(
+            SimpleNamespace(user=SimpleNamespace(id=1), guild=None),
+            [
+                {
+                    "game": SimpleNamespace(status="open", start_date=date(2026, 8, 2)),
+                    "leaderboard": [],
+                    "title": "Soon Game",
+                    "description": "Your rank: #1",
+                    "embed": None,
+                    "rank_page_count": 1,
+                    "rank_pages": {
+                        0: {
+                            "png": b"png",
+                            "filename": "lb.png",
+                            "rank_start": 1,
+                            "rank_end": 0,
+                        }
+                    },
+                }
+            ],
+            show_game_controls=False,
+        )
+        embed, _file = view._page_payload()
+        assert embed.description is not None
+        assert embed.description.startswith("⚠️⚠️ NOTICE")
+        assert "Your rank: #1" in embed.description
+
+    asyncio.run(run())
+
+
 def test_private_leaderboard_access_requires_owner_or_participation(mocker):
     import discord_bot as db
 
