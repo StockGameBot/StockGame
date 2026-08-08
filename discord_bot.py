@@ -2533,7 +2533,7 @@ def _prestart_notice(game) -> str | None:
     ts = _first_buy_approx_unix(game)
     return (
         f"⚠️⚠️ **This game has not started yet.** All stock picks stay **pending** until "
-        f"the first buy settles on the start date: <t:{ts}:f> (~<t:{ts}:R>). "
+        f"the first buy settles on the start date: <t:{ts}:D> around <t:{ts}:t> (<t:{ts}:R>). "
         f"Prices will not move until then."
     )
 
