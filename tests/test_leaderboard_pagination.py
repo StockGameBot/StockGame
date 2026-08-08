@@ -206,7 +206,8 @@ def test_prestart_notice_only_for_open_games_uses_discord_timestamps(mocker):
     assert notice.startswith("⚠️⚠️")
     assert "pending" in notice.lower()
     ts = db._first_buy_approx_unix(open_game)
-    assert f"<t:{ts}:f>" in notice
+    assert f"<t:{ts}:D>" in notice
+    assert f"<t:{ts}:t>" in notice
     assert f"<t:{ts}:R>" in notice
 
 
