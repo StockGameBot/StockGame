@@ -23,13 +23,18 @@ import pytz
 
 # LOCAL
 from helpers.datatype_validation import GameLeaderboard
-from helpers.views import Pagination, LeaderboardImageGenerator, StockPortfolioImageGenerator
+from helpers.views import (
+    Pagination,
+    get_leaderboard_generator,
+    get_portfolio_generator,
+)
 from helpers.leaderboard_push import (
     bot_can_push_to_channel,
     collect_player_picks,
+    fingerprint_image_rows,
     push_all_recurring_leaderboards,
 )
-from helpers.recurring_leaderboard_image import RecurringLeaderboardImageGenerator
+from helpers.recurring_leaderboard_image import get_recurring_generator
 import helpers.autocomplete as ac
 from helpers.logging_setup import (
     attach_critical_dm_bot,
@@ -359,9 +364,10 @@ ac.init_autocomplete(fe)  # Inject the shared Frontend instance into autocomplet
 # Prevent overlapping update_all runs if a cycle takes longer than the loop interval.
 _game_update_lock = asyncio.Lock()
 
-# In-memory leaderboard image cache: "game_id:rank_page" -> (png_bytes, generated_at)
-_leaderboard_image_cache: dict[str, tuple[bytes, float]] = {}
+# In-memory leaderboard image cache: "game_id:rank_page" -> (png_bytes, fingerprint, generated_at)
+_leaderboard_image_cache: dict[str, tuple[bytes, str, float]] = {}
 _LEADERBOARD_CACHE_TTL_SEC = 600.0  # align with long-lived view timeout
+_LEADERBOARD_CACHE_MAX_ENTRIES = 64
 _LEADERBOARD_RANK_PAGE_SIZE = 15
 _RECURRING_LEADERBOARD_RANK_PAGE_SIZE = 5
 # Generous so a full rank page always fits; pagination, not height, caps the rows.
@@ -379,13 +385,24 @@ def invalidate_leaderboard_cache(game_ids: Optional[list[str]] = None) -> None:
                 _leaderboard_image_cache.pop(key, None)
 
 
+def _store_leaderboard_cache(cache_key: str, data: bytes, fingerprint: str) -> None:
+    """Insert a cache entry and drop oldest keys when over capacity."""
+    now = time.monotonic()
+    _leaderboard_image_cache[cache_key] = (data, fingerprint, now)
+    if len(_leaderboard_image_cache) <= _LEADERBOARD_CACHE_MAX_ENTRIES:
+        return
+    ordered = sorted(_leaderboard_image_cache.items(), key=lambda item: item[1][2])
+    overflow = len(_leaderboard_image_cache) - _LEADERBOARD_CACHE_MAX_ENTRIES
+    for key, _value in ordered[:overflow]:
+        _leaderboard_image_cache.pop(key, None)
+
+
 async def _run_update_and_push(*, force: bool = False) -> None:
     """Run GameLogic.update_all off-loop, then push recurring leaderboards on Discord."""
     if force:
         await asyncio.to_thread(fe.gl.update_all, None, True)
     else:
         await asyncio.to_thread(fe.gl.update_all)
-    invalidate_leaderboard_cache()
     await push_all_recurring_leaderboards(bot, fe, name_resolver=resolve_player_name)
 
 
@@ -2054,7 +2071,6 @@ async def update(
                 user_id=interaction.user.id,
                 enforce_permissions=False,
             )
-            invalidate_leaderboard_cache()
             await push_all_recurring_leaderboards(bot, fe, name_resolver=resolve_player_name)
         embed.title = "Success"
         embed.description = f"All games have been successfully updated"
@@ -2414,25 +2430,31 @@ def _cached_game_info_leaderboard_png(
     processed_leaderboard: list,
     recurring: bool = False,
 ) -> bytes:
+    fingerprint = fingerprint_image_rows(
+        game_data.get("id"),
+        game_data.get("name"),
+        processed_leaderboard,
+    )
     now = time.monotonic()
     cached = _leaderboard_image_cache.get(cache_key)
-    if cached and (now - cached[1]) < _LEADERBOARD_CACHE_TTL_SEC:
+    if (
+        cached
+        and cached[1] == fingerprint
+        and (now - cached[2]) < _LEADERBOARD_CACHE_TTL_SEC
+    ):
         return cached[0]
     if recurring:
-        buf = RecurringLeaderboardImageGenerator(
-            theme="discord_dark",
-            max_height=_RECURRING_PAGE_MAX_HEIGHT,
-        ).create_image(
+        buf = get_recurring_generator(max_height=_RECURRING_PAGE_MAX_HEIGHT).create_image(
             game_data,
             processed_leaderboard,
             target_n=max(len(processed_leaderboard), 1),
         )
     else:
-        buf = LeaderboardImageGenerator(theme="discord_dark").create_leaderboard_image(
+        buf = get_leaderboard_generator().create_leaderboard_image(
             game_data, processed_leaderboard
         )
     data = buf.getvalue()
-    _leaderboard_image_cache[cache_key] = (data, now)
+    _store_leaderboard_cache(cache_key, data, fingerprint)
     return data
 
 
@@ -2455,15 +2477,6 @@ async def _build_rank_page(
     rank_end = start + len(entries) if entries else 0
     filename = f"leaderboard_{game.id}_{page_index + 1}.png"
     cache_key = f"{game.id}:{page_index}"
-    now = time.monotonic()
-    cached = _leaderboard_image_cache.get(cache_key)
-    if cached and (now - cached[1]) < _LEADERBOARD_CACHE_TTL_SEC:
-        return {
-            "png": cached[0],
-            "filename": filename,
-            "rank_start": rank_start,
-            "rank_end": rank_end,
-        }
 
     processed: list[dict] = []
     for rank, entry in enumerate(entries, start=rank_start):
@@ -2803,7 +2816,7 @@ def _build_my_stocks_portfolio(user_id: int, game_id: str, display_name: str):
         }
         for pick in picks
     ]
-    image_buffer = StockPortfolioImageGenerator(theme='discord_dark').create_portfolio_image(
+    image_buffer = get_portfolio_generator().create_portfolio_image(
         user_data, game_data, stock_picks, info
     )
     remaining, total = fe.pick_capacity(user_id, game_id)

@@ -133,13 +133,15 @@ def test_render_push_pages_splits_top_twenty_without_image_titles(mocker):
 
     import helpers.leaderboard_push as lp
 
-    generator = mocker.patch.object(lp, "RecurringLeaderboardImageGenerator")
-    generator.return_value.create_image.side_effect = [
+    lp.clear_push_image_cache()
+    generator = MagicMock()
+    generator.create_image.side_effect = [
         BytesIO(b"png1"),
         BytesIO(b"png2"),
         BytesIO(b"png3"),
         BytesIO(b"png4"),
     ]
+    mocker.patch.object(lp, "get_recurring_generator", return_value=generator)
     game = SimpleNamespace(
         name="Recurring",
         id="REC01",
@@ -150,15 +152,23 @@ def test_render_push_pages_splits_top_twenty_without_image_titles(mocker):
     )
     players = [{"user_id": user_id} for user_id in range(20)]
 
-    embed, images = lp.render_push_pages(game, players, [])
+    embed, images, fingerprint, cache_hit = lp.render_push_pages(game, players, [])
 
+    assert cache_hit is False
+    assert fingerprint
     assert len(images) == 4
     assert "(ID: REC01)" in embed.title
-    calls = generator.return_value.create_image.call_args_list
+    calls = generator.create_image.call_args_list
     assert [call.kwargs["show_title"] for call in calls] == [False, False, False, False]
     assert [call.kwargs["target_n"] for call in calls] == [5, 5, 5, 5]
     assert [row["rank"] for row in calls[1].args[1]] == [6, 7, 8, 9, 10]
     assert all(call.kwargs["created_at"] is not None for call in calls)
+
+    embed2, images2, fingerprint2, cache_hit2 = lp.render_push_pages(game, players, [])
+    assert cache_hit2 is True
+    assert fingerprint2 == fingerprint
+    assert len(images2) == 4
+    assert generator.create_image.call_count == 4
 
 
 def test_days_in_first_idempotent(db_path, mocker):
@@ -383,7 +393,7 @@ def test_push_uses_live_name_resolver():
 
     def fake_render(_game, players, _owned):
         rendered["players"] = [dict(p) for p in players]
-        return discord.Embed(title="t"), [BytesIO(b"png")]
+        return discord.Embed(title="t"), [BytesIO(b"png")], "fp1", False
 
     async def resolver(_user_id, _guild):
         return "LiveName"
@@ -395,6 +405,74 @@ def test_push_uses_live_name_resolver():
         asyncio.run(lp.push_all_recurring_leaderboards(bot, fe, name_resolver=resolver))
 
     assert rendered["players"][0]["display_name"] == "LiveName"
+
+
+def test_fingerprint_push_pages_stable_until_value_changes():
+    import helpers.leaderboard_push as lp
+
+    game = SimpleNamespace(id="G1", name="Game")
+    players = [
+        {
+            "user_id": 1,
+            "rank": 1,
+            "display_name": "Ann",
+            "current_value": 11000.123456,
+            "change_dollars": 1000.987,
+            "change_percent": 10.5555,
+            "days_in_first": 2,
+            "picks": [{"ticker": "AAPL", "company": "Apple", "change_percent": 4.1111}],
+        }
+    ]
+    first = lp.fingerprint_push_pages(game, players)
+    second = lp.fingerprint_push_pages(game, players)
+    assert first == second
+
+    players[0]["change_percent"] = 10.5556
+    assert lp.fingerprint_push_pages(game, players) != first
+
+
+def test_push_all_skips_discord_edit_on_cache_hit(mocker):
+    import asyncio
+    from io import BytesIO
+
+    import helpers.leaderboard_push as lp
+
+    lp.clear_push_image_cache()
+    game = SimpleNamespace(
+        id="REC01",
+        name="Recurring",
+        status="active",
+        template_id=1,
+        leaderboard_channel_id="99",
+        leaderboard_message_id="111",
+        change_dollars=0,
+        change_percent=0,
+        start_date=date.today(),
+        end_date=None,
+    )
+    fe = MagicMock()
+    fe.list_games_ranked.return_value = [(game, 1)]
+    fe.be.get_game.return_value = game
+
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.guild = MagicMock()
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+
+    push_edit = AsyncMock(return_value="111")
+    players = [{"user_id": 5, "display_name": "Ann", "rank": 1, "current_value": 10000,
+                "change_dollars": 0, "change_percent": 0, "days_in_first": 0, "picks": []}]
+
+    def fake_render(_game, _players, _owned):
+        return discord.Embed(title="t"), [BytesIO(b"png")], "same-fp", True
+
+    with patch.object(lp, "collect_push_players", return_value=(players, [])), \
+         patch.object(lp, "render_push_pages", side_effect=fake_render), \
+         patch.object(lp, "bot_can_push_to_channel", return_value=True), \
+         patch.object(lp, "push_or_edit_leaderboard_messages", new=push_edit):
+        asyncio.run(lp.push_all_recurring_leaderboards(bot, fe, name_resolver=AsyncMock(return_value="Ann")))
+
+    push_edit.assert_not_called()
 
 
 def test_bot_can_push_permissions():

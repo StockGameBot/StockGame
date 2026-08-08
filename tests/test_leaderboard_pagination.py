@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -393,8 +394,44 @@ def test_cached_png_switches_generator_on_recurring_flag():
 
     assert recurring.startswith(b"\x89PNG") and simple.startswith(b"\x89PNG")
     assert recurring != simple
-    # Same key returns the cached bytes rather than re-rendering.
-    assert db._cached_game_info_leaderboard_png("rec", game_data, [], True) == recurring
+    # Same key + same fingerprint returns cached bytes.
+    assert db._cached_game_info_leaderboard_png("rec", game_data, players, True) == recurring
+    # Different row payload misses the cache.
+    assert db._cached_game_info_leaderboard_png("rec", game_data, [], True) != recurring
+
+
+def test_slash_png_cache_hit_skips_generator(mocker):
+    import discord_bot as db
+
+    db._leaderboard_image_cache.clear()
+    game_data = {"name": "Game", "id": "GAME1", "starting_money": 10_000}
+    players = [
+        {
+            "rank": 1,
+            "user_id": 1,
+            "display_name": "Ann",
+            "current_value": 11_000,
+            "change_dollars": 1_000,
+            "change_percent": 10,
+            "days_in_first": 0,
+            "joined": date(2026, 8, 1),
+            "picks": [],
+        }
+    ]
+    generator = MagicMock()
+    generator.create_leaderboard_image.return_value = BytesIO(b"\x89PNG\r\n\x1a\nfirst")
+    mocker.patch.object(db, "get_leaderboard_generator", return_value=generator)
+
+    first = db._cached_game_info_leaderboard_png("g:0", game_data, players, False)
+    second = db._cached_game_info_leaderboard_png("g:0", game_data, players, False)
+    assert first == second
+    assert generator.create_leaderboard_image.call_count == 1
+
+    players[0]["change_percent"] = 12
+    generator.create_leaderboard_image.return_value = BytesIO(b"\x89PNG\r\n\x1a\nsecond")
+    third = db._cached_game_info_leaderboard_png("g:0", game_data, players, False)
+    assert third != first
+    assert generator.create_leaderboard_image.call_count == 2
 
 
 def test_game_arrows_only_include_own_and_other_recurring_games(mocker):
