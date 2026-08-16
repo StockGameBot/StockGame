@@ -76,6 +76,8 @@ name_cutoff = 25 # Cut names off at 25 characters
 # Legacy optional fallback only. Prefer Discord Server Settings → Integrations
 # to decide who can see/run sensitive commands (see wiki: Discord Integrations).
 dev_role_id = 1412173045350666271
+# Guild where Administrator / dev_role moderator powers apply (shared DB is not guild-scoped).
+HOME_GUILD_ID = 1358170062762283119
 
 logger = setup_app_logging(console_level=logging.INFO, root_level=logging.DEBUG)
 
@@ -83,8 +85,13 @@ logger = setup_app_logging(console_level=logging.INFO, root_level=logging.DEBUG)
 _db_action = ensure_database(DB_NAME)
 logger.info("Database %s: %s (schema %s)", DB_NAME, _db_action, db_ver)
 
+def is_home_guild(interaction: discord.Interaction) -> bool:
+    """True when the command was invoked in the bot's primary (home) guild."""
+    return interaction.guild is not None and interaction.guild.id == HOME_GUILD_ID
+
+
 def has_permission(user: discord.Member) -> bool:
-    """In-bot safety check for privileged actions.
+    """In-bot safety check for privileged actions in the home guild.
 
     Primary access control should be Discord **Integrations** (who can invoke
     the slash command at all). This function is a secondary gate:
@@ -103,15 +110,18 @@ def has_permission(user: discord.Member) -> bool:
     # Legacy role fallback — not the main reliance; Integrations should gate access.
     return any(role.id == dev_role_id for role in user.roles)
 
+
 def is_moderator(interaction: discord.Interaction) -> bool:
     """Whether the caller may run privileged bot actions.
 
-    Who can *see* these commands should be configured via Discord Integrations.
-    This check still runs if someone can invoke the command: bot OWNER, then
-    Administrator (or the legacy ``dev_role_id`` fallback).
+    Bot ``OWNER`` may act from any guild. Guild Administrator / ``dev_role_id``
+    only count in ``HOME_GUILD_ID`` so a foreign server admin cannot touch the
+    shared database.
     """
     if interaction.user.id == OWNER_ID:
         return True
+    if not is_home_guild(interaction):
+        return False
     return isinstance(interaction.user, discord.Member) and has_permission(interaction.user)
 
 def simple_embed(status:str, title:str, desc:Optional[str]=None):
@@ -1767,6 +1777,8 @@ class RecurringTemplateManager(discord.ui.View):
             ch = template.leaderboard_channel_id
             push_txt = f"On → <#{ch}>" if ch else "On (no channel yet)"
         embed.add_field(name="📣 Push Leaderboard", value=push_txt, inline=False)
+        if self.interaction.user.id != template.owner_id:
+            embed.add_field(name="👤 Owner", value=f"<@{template.owner_id}>", inline=True)
         embed.set_footer(text=f"Template ID: {template.id}")
         return embed
 
@@ -2017,14 +2029,17 @@ async def leave_game(
 @bot.tree.command(name="manage-recurring-games", description="Browse, stop, or delete recurring templates")
 @app_commands.default_permissions()
 async def manage_recurring_games(interaction: discord.Interaction):
-    """Paginate through your recurring templates with stop/delete controls."""
+    """Paginate recurring templates; moderators see every template in the DB."""
     try:
         try:
             templates = fe.be.get_many_game_templates(status=None)
         except LookupError:
             templates = ()
-        user_templates = [t for t in templates if t.owner_id == interaction.user.id]
-        if not user_templates:
+        if is_moderator(interaction):
+            visible_templates = list(templates)
+        else:
+            visible_templates = [t for t in templates if t.owner_id == interaction.user.id]
+        if not visible_templates:
             await interaction.response.send_message(
                 embed=discord.Embed(
                     title="Manage Recurring Games",
@@ -2035,7 +2050,7 @@ async def manage_recurring_games(interaction: discord.Interaction):
             )
             return
 
-        view = RecurringTemplateManager(interaction, user_templates)
+        view = RecurringTemplateManager(interaction, visible_templates)
         await interaction.response.send_message(
             embed=view.build_embed(),
             view=view,
@@ -2062,6 +2077,16 @@ async def update(
     interaction: discord.Interaction, 
     # game_id: str,
 ):
+    if not is_moderator(interaction):
+        await interaction.response.send_message(
+            embed=simple_embed(
+                status='failed',
+                title='Not Allowed',
+                desc='Only moderators in the home server can force-update all games.',
+            ),
+            ephemeral=ephemeral_test,
+        )
+        return
     await interaction.response.defer(ephemeral=ephemeral_test) # Defer the response to allow time for the update
     embed = discord.Embed()
     try:
@@ -3192,6 +3217,16 @@ async def logs(
   interaction: discord.Interaction,
   kind: Literal['debug', 'error'] = 'debug',
 ):
+    if not is_moderator(interaction):
+        await interaction.response.send_message(
+            embed=simple_embed(
+                status='failed',
+                title='Not Allowed',
+                desc='Only moderators in the home server can download bot logs.',
+            ),
+            ephemeral=True,
+        )
+        return
     title = "Logs"
     status = 'success'
     path = latest_log_path(kind)
