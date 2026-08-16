@@ -54,11 +54,14 @@ usermod -aG docker "${DEPLOY_USER}"
 mkdir -p "${DEPLOY_HOME}/.ssh"
 chmod 700 "${DEPLOY_HOME}/.ssh"
 
-chmod 755 "${DEPLOY_SCRIPT}"
+chmod 755 "${DEPLOY_SCRIPT}" "${SCRIPT_DIR}/setup-deploy-user.sh"
+
+# Invoke via bash so deploy works even when git clone drops the executable bit (100644).
+DEPLOY_CMD="/bin/bash ${DEPLOY_SCRIPT}"
 
 # Forced command: SSH as ``deploy`` always runs the in-repo deploy script.
 PUBKEY_LINE="$(tr -d '\r\n' < "${GITHUB_ACTIONS_PUBKEY}")"
-RESTRICTIONS="command=\"${DEPLOY_SCRIPT}\",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,no-user-rc,restrict"
+RESTRICTIONS="command=\"${DEPLOY_CMD}\",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,no-user-rc,restrict"
 echo "${RESTRICTIONS} ${PUBKEY_LINE}" > "${AUTH_KEYS}"
 chmod 600 "${AUTH_KEYS}"
 chown -R "${DEPLOY_USER}:${DEPLOY_USER}" "${DEPLOY_HOME}"
@@ -71,7 +74,7 @@ cat <<EOF
 Deploy user "${DEPLOY_USER}" is ready.
 
 Repo:          ${REPO_DIR}
-Deploy script: ${DEPLOY_SCRIPT}
+Deploy script: ${DEPLOY_CMD}
 (Updates automatically when git pull brings in new script versions.)
 
 NEXT STEPS — run as root unless noted
@@ -96,7 +99,7 @@ NEXT STEPS — run as root unless noted
      runuser -u ${DEPLOY_USER} -- mkdir -p ${REPO_DIR}/data ${REPO_DIR}/logs
 
 4) Test deploy manually
-     runuser -u ${DEPLOY_USER} -- ${DEPLOY_SCRIPT}
+     runuser -u ${DEPLOY_USER} -- ${DEPLOY_CMD}
 
 5) GitHub Actions secrets (repo -> Settings -> Secrets and variables -> Actions)
      DROPLET_HOST     = droplet IP or hostname
@@ -108,7 +111,7 @@ NEXT STEPS — run as root unless noted
      ssh-keygen -t ed25519 -C "github-actions-stockgame-deploy" \\
        -f ./github_actions_deploy -N ""
 
-6) Push to main; after CI passes, Deploy workflow SSHes in and runs ${DEPLOY_SCRIPT}.
+6) Push to main; after CI passes, Deploy workflow SSHes in and runs ${DEPLOY_CMD}.
 
 SECURITY NOTES
 - deploy user: nologin shell + forced command only.
