@@ -22,6 +22,8 @@ jobs:
           username: ${{ secrets.DROPLET_USER }}
           key: ${{ secrets.DROPLET_SSH_KEY }}
           port: ${{ secrets.DROPLET_PORT || 22 }}
-          # Forced command on the droplet points at /opt/StockGame/scripts/deploy/deploy-stockgame.sh
+          command_timeout: 30m
+          # Droplet authorized_keys forces: /bin/bash /opt/StockGame/scripts/deploy/deploy-stockgame.sh
+          # See scripts/deploy/setup-deploy-user.sh and verify-deploy-ssh.sh
           script: |
-            echo "Deploy SSH session started (server runs forced deploy command)."
+            /bin/bash /opt/StockGame/scripts/deploy/deploy-stockgame.sh
