@@ -152,6 +152,23 @@ class GameParticipant(BaseModel):
 GameParticipants = TypeAdapter(list[GameParticipant])
 
 
+class GameInvite(BaseModel):
+    model_config = ConfigDict(extra='ignore')
+
+    id: int = Field(validation_alias=AliasChoices('invite_id'))
+    game_id: str
+    user_id: int
+    inviter_id: int
+    dm_channel_id: Optional[int] = None
+    dm_message_id: Optional[int] = None
+    status: str = 'pending'
+    datetime_created: datetime
+    datetime_updated: Optional[datetime] = None
+
+
+GameInvites = TypeAdapter(list[GameInvite])
+
+
 class StockPick(BaseModel):
     model_config = ConfigDict(extra='ignore') # Ignore extra data
     

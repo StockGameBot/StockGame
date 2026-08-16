@@ -35,6 +35,7 @@ from helpers.leaderboard_push import (
     push_all_recurring_leaderboards,
 )
 from helpers.recurring_leaderboard_image import get_recurring_generator
+from helpers import game_invites as gi
 import helpers.autocomplete as ac
 from helpers.logging_setup import (
     attach_critical_dm_bot,
@@ -1307,25 +1308,48 @@ async def join_game(
 ):
     status = 'failed'
     description = "failed"
+    title = "Game Join Failed"
     try:
         fe.register(user_id=interaction.user.id, username=interaction.user.display_name)
+        pending_invite = fe.get_pending_game_invite(interaction.user.id, game_id)
+        try:
+            game = fe.be.get_game(game_id)
+            force_active = pending_invite is not None and game.private_game
+        except LookupError:
+            force_active = False
         fe.join_game(
-            user_id=interaction.user.id, 
-            game_id=game_id
+            user_id=interaction.user.id,
+            game_id=game_id,
+            force_active=force_active,
         )
 
         game_name = fe._get_game_name(game_id)
         title = "Game Joined Successfully"
         description = f"You have joined **{game_name}** (#{game_id})."
         status = 'success'
-        # Private games create a pending participant until the owner approves it.
+        participant_status = 'active'
         try:
             participants = fe.be.get_many_participants(user_id=interaction.user.id, game_id=game_id)
+            if participants:
+                participant_status = participants[0].status
             if participants and participants[0].status == 'pending':
                 title = "Join Request Submitted"
                 description = f"Your request to join **{game_name}** (#{game_id}) is pending. The owner must approve it before you can play."
         except LookupError:
             logger.warning('Could not verify join status for user %s in game %s.', interaction.user.id, game_id)
+
+        if pending_invite:
+            fe.finalize_game_invite(game_id=game_id, user_id=interaction.user.id, status='accepted')
+            await gi.edit_invite_dm(
+                interaction.client,
+                dm_channel_id=pending_invite.dm_channel_id,
+                dm_message_id=pending_invite.dm_message_id,
+                embed=gi.build_join_result_embed(
+                    game_name=game_name,
+                    game_id=game_id,
+                    participant_status=participant_status,
+                ),
+            )
     except LookupError:
         description = f'No game with the ID {game_id}.'
         
@@ -1546,92 +1570,32 @@ async def invite_user(
         )
         return
 
-    invite_embed = discord.Embed(
-        title="Game Invite",
-        description=f"You have been invited to **{invited_game.name}** (#{game_id}) by {interaction.user.display_name}.",
-        color=discord.Color.green()
+    invite_embed = gi.build_invite_embed(
+        invited_game.name,
+        game_id,
+        interaction.user.display_name,
     )
 
-    accept_button = discord.ui.Button(
-        label="Accept Invite",
-        style=discord.ButtonStyle.success,
-        custom_id="accept_invite",
-        emoji="✅"
+    view = gi.GameInviteView(
+        fe=fe,
+        game_id=game_id,
+        invitee_id=user.id,
+        game_name=invited_game.name,
+        inviter_name=interaction.user.display_name,
+        private_game=bool(invited_game.private_game),
     )
-
-    decline_button = discord.ui.Button(
-        label="Decline Invite",
-        style=discord.ButtonStyle.danger,
-        custom_id="decline_invite",
-        emoji="❌"
-    )
-
-    view = discord.ui.View()
-    view.add_item(accept_button)    
-    view.add_item(decline_button)
-
-    async def accept_invite_callback(button_interaction: discord.Interaction):
-        # Validate that the clicker is the invited user
-        if button_interaction.user.id != user.id:
-            await button_interaction.response.send_message(
-                "This invite was not meant for you.", ephemeral=True
-            )
-            return
-
-        try:
-            fe.register(user_id=user.id, username=user.display_name)
-            fe.join_game(
-                user_id=user.id,
-                game_id=game_id,
-                force_active=bool(invited_game.private_game),
-            )
-            participant = fe.be.get_many_participants(user_id=user.id, game_id=game_id)[0]
-            if participant.status == 'pending':
-                title = 'Join Request Submitted'
-                description = 'Your request is pending owner approval before you can play.'
-            else:
-                title = 'Game Joined'
-                description = f'You joined **{invited_game.name}** (#{game_id}).'
-            accept_embed = discord.Embed(
-                title=title,
-                description=description,
-                color=discord.Color.green(),
-            )
-        except ValueError as exc:
-            message = str(exc)
-            if 'already in game' in message.lower():
-                message = 'You are already participating in this game.'
-            elif 'pick_date' in message.lower():
-                message = 'The pick deadline for this game has passed.'
-            accept_embed = simple_embed(status='failed', title='Game Join Failed', desc=message)
-        except LookupError:
-            accept_embed = simple_embed(status='failed', title='Game Join Failed', desc='This game is no longer available.')
-        except Exception as exc:
-            logger.exception('Invite acceptance failed for user %s and game %s.', user.id, game_id, exc_info=exc)
-            accept_embed = discord.Embed(
-                title="Game Join Failed",
-                description='Unable to join the game. Please try again or contact a moderator.',
-                color=discord.Color.red(),
-            )
-
-        await button_interaction.response.edit_message(embed=accept_embed, view=None)
-
-    async def decline_invite_callback(interaction: discord.Interaction):
-        if interaction.user.id != user.id:
-            await interaction.response.send_message("This invite was not meant for you.", ephemeral=True)
-            return
-        decline_embed = discord.Embed(
-            title="Invite Declined",
-            description=f"You have declined the invite to game #{game_id}.",
-            color=discord.Color.red()
-        )
-        await interaction.response.edit_message(embed=decline_embed, view=None)
-
-    accept_button.callback = accept_invite_callback  # type: ignore[assignment]
-    decline_button.callback = decline_invite_callback
 
     try:
-        await user.send(embed=invite_embed, view=view)
+        dm_message = await user.send(embed=invite_embed, view=view)
+        view.message = dm_message
+        _invite, previous_invite = fe.record_game_invite(
+            game_id=game_id,
+            user_id=user.id,
+            inviter_id=interaction.user.id,
+            dm_channel_id=dm_message.channel.id,
+            dm_message_id=dm_message.id,
+        )
+        await gi.expire_superseded_invite_dm(bot, fe, previous_invite)
         await interaction.followup.send(
             embed=discord.Embed(
                 title='Invite Sent',

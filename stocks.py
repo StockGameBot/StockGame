@@ -1166,6 +1166,78 @@ class Backend:
         
         # is this participant_id or participation_id?
         self._delete_single(table='game_participants', id_column='participation_id', item_id=participant_id)
+
+    # # GAME INVITES # #
+    def upsert_game_invite(
+        self,
+        game_id: str,
+        user_id: int,
+        inviter_id: int,
+        *,
+        dm_channel_id: int | None = None,
+        dm_message_id: int | None = None,
+    ) -> tuple[dtv.GameInvite, dtv.GameInvite | None]:
+        """Create or refresh a pending invite. Returns ``(invite, previous_if_any)``."""
+        previous: dtv.GameInvite | None = None
+        try:
+            previous = self.get_game_invite(game_id=game_id, user_id=user_id)
+        except LookupError:
+            pass
+
+        now = _iso8601()
+        items = {
+            'inviter_id': inviter_id,
+            'dm_channel_id': dm_channel_id,
+            'dm_message_id': dm_message_id,
+            'status': 'pending',
+            'datetime_updated': now,
+        }
+        if previous:
+            resp = self.sql.update(
+                table='game_invites',
+                filters={'game_id': game_id, 'user_id': user_id},
+                items=items,
+            )
+            if resp.status != 'success':
+                raise Exception('Failed to refresh game invite.', resp)
+        else:
+            resp = self.sql.insert(
+                table='game_invites',
+                items={
+                    'game_id': game_id,
+                    'user_id': user_id,
+                    **items,
+                    'datetime_created': now,
+                },
+            )
+            if resp.status != 'success':
+                raise Exception('Failed to create game invite.', resp)
+
+        return self.get_game_invite(game_id=game_id, user_id=user_id), previous
+
+    def get_game_invite(self, game_id: str, user_id: int) -> dtv.GameInvite:
+        resp = self.sql.get(
+            table='game_invites',
+            filters={'game_id': game_id, 'user_id': user_id},
+        )
+        return self._single_get(model=dtv.GameInvite, resp=resp)
+
+    def get_pending_invites_for_user(self, user_id: int) -> tuple[dtv.GameInvite, ...]:
+        resp = self.sql.get(
+            table='game_invites',
+            filters={'user_id': user_id, 'status': 'pending'},
+        )
+        return self._many_get(typeadapter=dtv.GameInvites, resp=resp)
+
+    def set_game_invite_status(self, game_id: str, user_id: int, status: str) -> None:
+        resp = self.sql.update(
+            table='game_invites',
+            filters={'game_id': game_id, 'user_id': user_id},
+            items={'status': status, 'datetime_updated': _iso8601()},
+        )
+        if resp.status != 'success':
+            raise LookupError('Game invite not found.')
+
         
   
 class GameLogic: # Might move some of the control/running actions here
@@ -2185,6 +2257,39 @@ class Frontend: # This will be where a bot (like discord) interacts
             raise
         except LookupError:
             raise LookupError('Game not found.')
+
+    def get_pending_game_invite(self, user_id: int, game_id: str) -> dtv.GameInvite | None:
+        try:
+            invite = self.be.get_game_invite(game_id=game_id, user_id=user_id)
+        except LookupError:
+            return None
+        return invite if invite.status == 'pending' else None
+
+    def list_pending_game_invites(self, user_id: int) -> tuple[dtv.GameInvite, ...]:
+        try:
+            return self.be.get_pending_invites_for_user(user_id)
+        except LookupError:
+            return ()
+
+    def record_game_invite(
+        self,
+        game_id: str,
+        user_id: int,
+        inviter_id: int,
+        *,
+        dm_channel_id: int | None,
+        dm_message_id: int | None,
+    ) -> tuple[dtv.GameInvite, dtv.GameInvite | None]:
+        return self.be.upsert_game_invite(
+            game_id=game_id,
+            user_id=user_id,
+            inviter_id=inviter_id,
+            dm_channel_id=dm_channel_id,
+            dm_message_id=dm_message_id,
+        )
+
+    def finalize_game_invite(self, game_id: str, user_id: int, status: str) -> None:
+        self.be.set_game_invite_status(game_id=game_id, user_id=user_id, status=status)
 
     def kick_player(
         self,

@@ -130,6 +130,22 @@ def _collect_joinable_games(interaction: Interaction) -> list[tuple[object, bool
         if str(game.id) in joined_ids:
             continue
         rows.append((game, getattr(game, "owner_id", None) == interaction.user.id))
+
+    existing_ids = {str(game.id) for game, _ in rows}
+    try:
+        pending_invites = _fe.list_pending_game_invites(interaction.user.id)
+    except Exception:
+        pending_invites = ()
+    for invite in pending_invites:
+        game_id = str(invite.game_id)
+        if game_id in joined_ids or game_id in existing_ids:
+            continue
+        try:
+            game = _fe.be.get_game(game_id=game_id)
+        except LookupError:
+            continue
+        rows.append((game, False))
+        existing_ids.add(game_id)
     return rows
 
 
