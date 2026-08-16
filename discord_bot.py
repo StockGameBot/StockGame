@@ -610,7 +610,7 @@ class _WizardRenameView(InitiatorOnlyView):
     def __init__(self, *, state: dict, message: discord.Message, initiator_id: int, taken_name: str):
         super().__init__(initiator_id, timeout=120)
         self.state = state
-        self.message = message
+        self.wizard_message = message
         self.taken_name = taken_name
 
     @discord.ui.button(label="Choose a new name", style=discord.ButtonStyle.primary, emoji="✏️")
@@ -622,7 +622,7 @@ class _WizardRenameView(InitiatorOnlyView):
         await interaction.response.send_modal(
             _WizardRenameModal(
                 state=self.state,
-                message=self.message,
+                message=self.wizard_message,
                 initiator_id=self.initiator_id,
             )
         )

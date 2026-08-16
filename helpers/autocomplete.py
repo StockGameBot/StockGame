@@ -10,7 +10,7 @@ import discord
 from discord.app_commands import Choice
 from discord.interactions import Interaction
 from helpers.alpaca_client import to_db_ticker
-from helpers.datatype_validation import StockPick
+from helpers.datatype_validation import Game, StockPick
 from helpers.equity_meta import autocomplete_label
 from typing import TYPE_CHECKING
 
@@ -41,7 +41,7 @@ def _normalize_typed_ticker(current: str) -> str | None:
     return ticker
 
 
-def format_game_autocomplete_label(game, *, is_owner: bool = False) -> str:
+def format_game_autocomplete_label(game: Game, *, is_owner: bool = False) -> str:
     """Uniform game label: optional 🔁/🔒 prefixes, name, id, optional [OWNER]."""
     prefix = f"{'🔁 ' if getattr(game, 'template_id', None) is not None else ''}"
     prefix += f"{'🔒 ' if getattr(game, 'private_game', False) else ''}"
@@ -49,7 +49,7 @@ def format_game_autocomplete_label(game, *, is_owner: bool = False) -> str:
     return f"{prefix}{game.name} (ID: {game.id}){suffix}"[:100]
 
 
-def _matches_game_needle(game, needle: str) -> bool:
+def _matches_game_needle(game: Game, needle: str) -> bool:
     if not needle:
         return True
     haystack = f"{game.name} {game.id}".lower()
@@ -57,7 +57,7 @@ def _matches_game_needle(game, needle: str) -> bool:
 
 
 def _choices_from_games(
-    games: list[tuple[object, bool]],
+    games: list[tuple[Game, bool]],
     needle: str,
 ) -> list[Choice[str]]:
     """Build up to 25 choices from ``(game, is_owner)`` pairs."""
@@ -80,7 +80,7 @@ def _choices_from_games(
 class GameAutocompleteSpec:
     """How to collect games for a slash-command autocomplete handler."""
 
-    collector: Callable[[Interaction], list[tuple[object, bool]]]
+    collector: Callable[[Interaction], list[tuple[Game, bool]]]
 
 
 def _collect_participant_games(
@@ -89,7 +89,7 @@ def _collect_participant_games(
     owner_only: bool = False,
     private_owner_only: bool = False,
     include_ended: bool = False,
-) -> list[tuple[object, bool]]:
+) -> list[tuple[Game, bool]]:
     if _fe is None:
         return []
     try:
@@ -97,7 +97,7 @@ def _collect_participant_games(
     except LookupError:
         return []
 
-    rows: list[tuple[object, bool]] = []
+    rows: list[tuple[Game, bool]] = []
     for game in user_games.games:
         is_owner = game.owner_id == interaction.user.id
         if owner_only and not is_owner:
@@ -110,7 +110,7 @@ def _collect_participant_games(
     return rows
 
 
-def _collect_joinable_games(interaction: Interaction) -> list[tuple[object, bool]]:
+def _collect_joinable_games(interaction: Interaction) -> list[tuple[Game, bool]]:
     if _fe is None:
         return []
     try:
@@ -125,7 +125,7 @@ def _collect_joinable_games(interaction: Interaction) -> list[tuple[object, bool
     except LookupError:
         joined_ids = set()
 
-    rows: list[tuple[object, bool]] = []
+    rows: list[tuple[Game, bool]] = []
     for game, _count in ranked:
         if str(game.id) in joined_ids:
             continue
@@ -149,7 +149,7 @@ def _collect_joinable_games(interaction: Interaction) -> list[tuple[object, bool
     return rows
 
 
-def _collect_leaderboard_games(interaction: Interaction) -> list[tuple[object, bool]]:
+def _collect_leaderboard_games(interaction: Interaction) -> list[tuple[Game, bool]]:
     if _fe is None:
         return []
 
@@ -169,7 +169,7 @@ def _collect_leaderboard_games(interaction: Interaction) -> list[tuple[object, b
         public = []
 
     mine_ids = {str(game.id) for game, _count in mine}
-    ordered: list[tuple[object, bool]] = []
+    ordered: list[tuple[Game, bool]] = []
     seen: set[str] = set()
 
     def _append(group: list, *, is_owner: bool) -> None:
@@ -193,7 +193,7 @@ def _collect_leaderboard_games(interaction: Interaction) -> list[tuple[object, b
     return ordered
 
 
-def _collect_game_info_games(interaction: Interaction) -> list[tuple[object, bool]]:
+def _collect_game_info_games(interaction: Interaction) -> list[tuple[Game, bool]]:
     if _fe is None:
         return []
 
@@ -212,7 +212,7 @@ def _collect_game_info_games(interaction: Interaction) -> list[tuple[object, boo
     except LookupError:
         public = []
 
-    accessible: list[tuple[object, bool]] = []
+    accessible: list[tuple[Game, bool]] = []
     seen: set[str] = set()
     for game, _count in mine:
         if game.private_game:
