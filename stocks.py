@@ -1996,6 +1996,7 @@ class Frontend: # This will be where a bot (like discord) interacts
         include_active: bool = True,
         include_ended: bool = False,
         owner_id: Optional[int] = None,
+        viewer_user_id: Optional[int] = None,
         today: Optional[date] = None,
     ) -> list[tuple[dtv.Game, int]]:
         """List games ordered for Discord ``/game-list``.
@@ -2004,6 +2005,9 @@ class Frontend: # This will be where a bot (like discord) interacts
         1. Recurring games (``template_id`` set), then non-recurring
         2. Within each group: time-prominent games first, then the rest
         3. Within each prominence bucket: higher player count first
+
+        When ``viewer_user_id`` is set, private games that user owns or plays
+        are merged in (other users' private games stay hidden).
 
         Returns:
             list of ``(game, player_count)`` where player_count is active+pending.
@@ -2029,6 +2033,22 @@ class Frontend: # This will be where a bot (like discord) interacts
             except LookupError:
                 player_count = 0
             scored.append((game, player_count))
+
+        if viewer_user_id is not None and owner_id is None:
+            existing_ids = {str(game.id) for game, _count in scored}
+            try:
+                mine = self.list_my_games_ranked(
+                    viewer_user_id,
+                    include_ended=False,
+                    today=today,
+                )
+            except LookupError:
+                mine = []
+            for game, player_count in mine:
+                if not game.private_game or str(game.id) in existing_ids:
+                    continue
+                scored.append((game, player_count))
+                existing_ids.add(str(game.id))
 
         return self._rank_scored_games(scored, today)
 
@@ -2525,6 +2545,14 @@ class Frontend: # This will be where a bot (like discord) interacts
             return self.be.get_many_participants(game_id=game_id, status='pending')
         except LookupError: # no pending users, return empty list
             return ()
+
+    def count_pending_participants(self, game_id: int | str) -> int:
+        """Number of users awaiting approval on a private game (0 if none)."""
+        try:
+            pending = self.be.get_many_participants(game_id=game_id, status='pending')
+        except LookupError:
+            return 0
+        return len(pending)
         
     def approve_game_users(self, user_id:int, game_id:int | str, approved_user_id:int, enforce_permissions:bool=True):
         """Approve/add a user to private game

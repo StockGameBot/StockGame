@@ -3,10 +3,12 @@
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
+from typing import Callable
 
 import discord
-from discord.app_commands import Choice # Explicitly import Choice for clarity
-from discord.interactions import Interaction # Explicitly import Interaction for clarity
+from discord.app_commands import Choice
+from discord.interactions import Interaction
 from helpers.alpaca_client import to_db_ticker
 from helpers.datatype_validation import StockPick
 from helpers.equity_meta import autocomplete_label
@@ -38,15 +40,260 @@ def _normalize_typed_ticker(current: str) -> str | None:
         return None
     return ticker
 
-# Autocomplete function for stock symbols based on user's stocks in a specific game
+
+def format_game_autocomplete_label(game, *, is_owner: bool = False) -> str:
+    """Uniform game label: optional 🔁/🔒 prefixes, name, id, optional [OWNER]."""
+    prefix = f"{'🔁 ' if getattr(game, 'template_id', None) is not None else ''}"
+    prefix += f"{'🔒 ' if getattr(game, 'private_game', False) else ''}"
+    suffix = " [OWNER]" if is_owner else ""
+    return f"{prefix}{game.name} (ID: {game.id}){suffix}"[:100]
+
+
+def _matches_game_needle(game, needle: str) -> bool:
+    if not needle:
+        return True
+    haystack = f"{game.name} {game.id}".lower()
+    return needle in haystack
+
+
+def _choices_from_games(
+    games: list[tuple[object, bool]],
+    needle: str,
+) -> list[Choice[str]]:
+    """Build up to 25 choices from ``(game, is_owner)`` pairs."""
+    choices: list[Choice[str]] = []
+    for game, is_owner in games:
+        if not _matches_game_needle(game, needle):
+            continue
+        choices.append(
+            Choice(
+                name=format_game_autocomplete_label(game, is_owner=is_owner),
+                value=str(game.id),
+            )
+        )
+        if len(choices) >= 25:
+            break
+    return choices
+
+
+@dataclass(frozen=True)
+class GameAutocompleteSpec:
+    """How to collect games for a slash-command autocomplete handler."""
+
+    collector: Callable[[Interaction], list[tuple[object, bool]]]
+
+
+def _collect_participant_games(
+    interaction: Interaction,
+    *,
+    owner_only: bool = False,
+    private_owner_only: bool = False,
+    include_ended: bool = False,
+) -> list[tuple[object, bool]]:
+    if _fe is None:
+        return []
+    try:
+        user_games = _fe.my_games(interaction.user.id, include_ended=include_ended)
+    except LookupError:
+        return []
+
+    rows: list[tuple[object, bool]] = []
+    for game in user_games.games:
+        is_owner = game.owner_id == interaction.user.id
+        if owner_only and not is_owner:
+            continue
+        if private_owner_only and (not is_owner or not game.private_game):
+            continue
+        if private_owner_only and game.status == 'ended':
+            continue
+        rows.append((game, is_owner))
+    return rows
+
+
+def _collect_joinable_games(interaction: Interaction) -> list[tuple[object, bool]]:
+    if _fe is None:
+        return []
+    try:
+        ranked = _fe.list_games_ranked(include_open=True, include_active=True)
+    except LookupError:
+        ranked = []
+    try:
+        joined_ids = {
+            str(participant.game_id)
+            for participant in _fe.be.get_many_participants(user_id=interaction.user.id)
+        }
+    except LookupError:
+        joined_ids = set()
+
+    rows: list[tuple[object, bool]] = []
+    for game, _count in ranked:
+        if str(game.id) in joined_ids:
+            continue
+        rows.append((game, getattr(game, "owner_id", None) == interaction.user.id))
+    return rows
+
+
+def _collect_leaderboard_games(interaction: Interaction) -> list[tuple[object, bool]]:
+    if _fe is None:
+        return []
+
+    try:
+        mine = _fe.list_my_games_ranked(interaction.user.id, include_ended=True)
+    except LookupError:
+        mine = []
+    try:
+        public = _fe.list_games_ranked(
+            include_public=True,
+            include_private=False,
+            include_open=True,
+            include_active=True,
+            include_ended=True,
+        )
+    except LookupError:
+        public = []
+
+    mine_ids = {str(game.id) for game, _count in mine}
+    ordered: list[tuple[object, bool]] = []
+    seen: set[str] = set()
+
+    def _append(group: list, *, is_owner: bool) -> None:
+        for game, _count in group:
+            game_id = str(game.id)
+            if game_id in seen:
+                continue
+            seen.add(game_id)
+            ordered.append((game, is_owner))
+
+    my_recurring = [item for item in mine if item[0].template_id is not None]
+    my_other = [item for item in mine if item[0].template_id is None]
+    public_not_mine = [item for item in public if str(item[0].id) not in mine_ids]
+    other_recurring = [item for item in public_not_mine if item[0].template_id is not None]
+    other_public = [item for item in public_not_mine if item[0].template_id is None]
+
+    _append(my_recurring, is_owner=True)
+    _append(my_other, is_owner=True)
+    _append(other_recurring, is_owner=False)
+    _append(other_public, is_owner=False)
+    return ordered
+
+
+def _collect_game_info_games(interaction: Interaction) -> list[tuple[object, bool]]:
+    if _fe is None:
+        return []
+
+    try:
+        mine = _fe.list_my_games_ranked(interaction.user.id, include_ended=True)
+    except LookupError:
+        mine = []
+    try:
+        public = _fe.list_games_ranked(
+            include_public=True,
+            include_private=False,
+            include_open=True,
+            include_active=True,
+            include_ended=True,
+        )
+    except LookupError:
+        public = []
+
+    accessible: list[tuple[object, bool]] = []
+    seen: set[str] = set()
+    for game, _count in mine:
+        if game.private_game:
+            try:
+                participants = _fe.be.get_many_participants(
+                    game_id=game.id, user_id=interaction.user.id
+                )
+            except LookupError:
+                continue
+            if game.owner_id != interaction.user.id and not any(
+                p.status == 'active' for p in participants
+            ):
+                continue
+        gid = str(game.id)
+        if gid not in seen:
+            seen.add(gid)
+            accessible.append((game, game.owner_id == interaction.user.id))
+    for game, _count in public:
+        gid = str(game.id)
+        if gid not in seen:
+            seen.add(gid)
+            accessible.append((game, game.owner_id == interaction.user.id))
+    return accessible
+
+
+_GAME_SPECS: dict[str, GameAutocompleteSpec] = {
+    "participant": GameAutocompleteSpec(
+        collector=lambda i: _collect_participant_games(i, include_ended=False),
+    ),
+    "owner": GameAutocompleteSpec(
+        collector=lambda i: _collect_participant_games(i, owner_only=True, include_ended=False),
+    ),
+    "private_owner": GameAutocompleteSpec(
+        collector=lambda i: _collect_participant_games(
+            i, private_owner_only=True, include_ended=False
+        ),
+    ),
+    "join": GameAutocompleteSpec(collector=_collect_joinable_games),
+    "leaderboard": GameAutocompleteSpec(collector=_collect_leaderboard_games),
+    "game_info": GameAutocompleteSpec(collector=_collect_game_info_games),
+}
+
+
+async def game_id_autocomplete(
+    interaction: Interaction,
+    current: str,
+    spec_key: str = "participant",
+) -> list[Choice[str]]:
+    """Shared game-id autocomplete; ``spec_key`` selects the collector in ``_GAME_SPECS``."""
+    try:
+        spec = _GAME_SPECS.get(spec_key)
+        if spec is None or _fe is None:
+            return []
+        needle = current.strip().lower()
+        games = spec.collector(interaction)
+        return _choices_from_games(games, needle)
+    except Exception:
+        logger.debug('Game autocomplete failed (%s).', spec_key, exc_info=True)
+        return []
+
+
+async def all_games_autocomplete(interaction: Interaction, current: str) -> list[Choice[str]]:
+    return await game_id_autocomplete(interaction, current, spec_key="participant")
+
+
+async def owner_games_autocomplete(interaction: Interaction, current: str) -> list[Choice[str]]:
+    return await game_id_autocomplete(interaction, current, spec_key="owner")
+
+
+async def private_owner_games_autocomplete(
+    interaction: Interaction,
+    current: str,
+) -> list[Choice[str]]:
+    return await game_id_autocomplete(interaction, current, spec_key="private_owner")
+
+
+async def join_games_autocomplete(interaction: Interaction, current: str) -> list[Choice[str]]:
+    return await game_id_autocomplete(interaction, current, spec_key="join")
+
+
+async def leaderboard_games_autocomplete(
+    interaction: Interaction,
+    current: str,
+) -> list[Choice[str]]:
+    return await game_id_autocomplete(interaction, current, spec_key="leaderboard")
+
+
+async def game_info_autocomplete(interaction: Interaction, current: str) -> list[Choice[str]]:
+    return await game_id_autocomplete(interaction, current, spec_key="game_info")
+
+
 async def sell_ticker_autocomplete(
     interaction: Interaction,
     current: str,
 ) -> list[Choice[str]]:
     """Autocomplete function to show user's stocks for the selected game"""
     try:
-        # Get the current game_id value from the interaction
-        # This accesses the partially filled command parameters
         game_id: str | None = None
         if interaction.data and 'options' in interaction.data:
             for option in interaction.data.get('options', []):
@@ -55,14 +302,12 @@ async def sell_ticker_autocomplete(
                     game_id = value if isinstance(value, str) else None
                     break
 
-        # If no game_id is entered yet, return empty list
         if not isinstance(game_id, str) or not game_id:
             return []
 
         if _fe is None:
             return []
 
-        # Get user's stocks for the specific game
         user_stocks: tuple[StockPick] = _fe.my_stocks(
             user_id=interaction.user.id,
             game_id=game_id,
@@ -70,9 +315,8 @@ async def sell_ticker_autocomplete(
             show_sold=False
         )
 
-        # Filter stocks based on current input and convert to choices
         choices = []
-        seen_tickers = set()  # Avoid duplicate tickers
+        seen_tickers = set()
 
         for stock in user_stocks:
             ticker: str | None = stock.stock_ticker
@@ -80,12 +324,10 @@ async def sell_ticker_autocomplete(
             if not isinstance(ticker, str):
                 continue
 
-            # Skip if we've already added this ticker
             if ticker in seen_tickers:
                 continue
             seen_tickers.add(ticker)
 
-            # Add status indicator
             status_indicator = ""
             if hasattr(stock, 'status'):
                 if stock.status == 'pending_buy':
@@ -93,22 +335,18 @@ async def sell_ticker_autocomplete(
 
             display_name: str = ticker + status_indicator
 
-            # Filter based on current input (search in ticker and company name)
             search_text = ticker.lower()
             if current.lower() in search_text:
                 choices.append(Choice(
-                    name=display_name[:100],  # Discord limits choice names to 100 chars
+                    name=display_name[:100],
                     value=ticker
                 ))
 
-        # Return up to 25 choices (Discord's limit)
         return choices[:25]
 
-    except (LookupError, AttributeError) as e:
-        # User has no stocks in this game or game doesn't exist
+    except (LookupError, AttributeError):
         return []
     except Exception:
-        # Handle any other errors gracefully
         logger.debug('Stock-pick autocomplete failed.', exc_info=True)
         return []
 
@@ -117,11 +355,7 @@ async def buy_ticker_autocomplete(
     interaction: Interaction,
     current: str,
 ) -> list[Choice[str]]:
-    """Suggest local tickers, and always offer the typed symbol if valid.
-
-    Discord clients generally require selecting an autocomplete choice. Without
-    including the typed ticker, symbols not already in the DB cannot be bought.
-    """
+    """Suggest local tickers, and always offer the typed symbol if valid."""
     try:
         if _fe is None:
             return []
@@ -131,12 +365,10 @@ async def buy_ticker_autocomplete(
 
         typed = _normalize_typed_ticker(current)
         if typed:
-            # First choice = exactly what the user typed (may not be in DB yet).
             typed_label = typed
             try:
                 existing = _fe.be.get_stock(typed)
                 typed_label = autocomplete_label(str(existing.ticker), existing.company)
-                # Stocks bought before name lookup may still store ticker-as-name.
                 if typed_label == typed and getattr(_fe, "gl", None) is not None:
                     await asyncio.to_thread(_fe.gl._ensure_company_name, existing)
                     existing = _fe.be.get_stock(typed)
@@ -162,7 +394,6 @@ async def buy_ticker_autocomplete(
             if needle and needle not in searchable:
                 continue
             if ticker in seen:
-                # Prefer the richer DB label over the generic typed entry.
                 choices = [
                     Choice(name=label[:100], value=ticker) if c.value == ticker else c
                     for c in choices
@@ -176,306 +407,7 @@ async def buy_ticker_autocomplete(
         return choices[:25]
     except Exception:
         logger.debug('Buy-ticker autocomplete failed.', exc_info=True)
-        # Last resort: still allow the typed ticker through.
         typed = _normalize_typed_ticker(current)
         if typed:
             return [Choice(name=typed, value=typed)]
-        return []
-
-# Autocomplete function for game_id parameter
-async def game_id_autocomplete(
-    interaction: Interaction,
-    current: str,
-    owner_only: bool = False
-) -> list[Choice[str]]:
-    """Autocomplete function to show user's games
-
-    Args:
-        interaction: Discord interaction
-        current: Current user input
-        owner_only: If True, only show games where user is the owner
-    """
-    try:
-        if _fe is None:
-            return []
-
-        # Get user's games using the frontend command
-        user_games = _fe.my_games(interaction.user.id, include_ended=False)
-
-        # Filter games based on current input and convert to choices
-        choices = []
-        for game in user_games.games:
-            # Skip non-owned games if owner_only is True
-            if owner_only and game.owner_id != interaction.user.id:
-                continue
-
-            # Create display text with game name and ID
-            display_name = f"{game.name} (ID: {game.id})"
-
-            # Add owner indicator if showing all games
-            if not owner_only and game.owner_id == interaction.user.id:
-                display_name += " [OWNER]"
-
-            # Filter based on current input (search in both name and ID)
-            if (current.lower() in game.name.lower() or
-                current in str(game.id)):
-                choices.append(Choice(
-                    name=display_name[:100],  # Discord limits choice names to 100 chars
-                    value=str(game.id)        # Return string to match command param type
-                ))
-
-        # Return up to 25 choices (Discord's limit)
-        return choices[:25]
-
-    except LookupError:
-        # User has no games, return empty list
-        return []
-    except Exception:
-        # Handle any other errors gracefully
-        logger.debug('Game autocomplete failed.', exc_info=True)
-        return []
-
-async def all_games_autocomplete(
-    interaction: Interaction,
-    current: str,
-) -> list[Choice[str]]:
-    return await game_id_autocomplete(interaction, current, owner_only=False)
-
-
-async def join_games_autocomplete(
-    interaction: Interaction,
-    current: str,
-) -> list[Choice[str]]:
-    """Suggest public joinable games in the same order as ``/game-list``.
-
-    Games the user has already joined (active or pending) are omitted.
-    """
-    try:
-        if _fe is None:
-            return []
-
-        ranked_games = _fe.list_games_ranked(
-            include_open=True,
-            include_active=True,
-        )
-        try:
-            joined_ids = {
-                str(participant.game_id)
-                for participant in _fe.be.get_many_participants(
-                    user_id=interaction.user.id
-                )
-            }
-        except LookupError:
-            joined_ids = set()
-
-        needle = current.strip().lower()
-        choices: list[Choice[str]] = []
-
-        for game, _player_count in ranked_games:
-            game_id = str(game.id)
-            if game_id in joined_ids:
-                continue
-            searchable = f"{game.name} {game_id}".lower()
-            if needle and needle not in searchable:
-                continue
-
-            recurring = "🔁 " if game.template_id is not None else ""
-            choices.append(
-                Choice(
-                    name=f"{recurring}{game.name} (ID: {game_id})"[:100],
-                    value=game_id,
-                )
-            )
-            if len(choices) >= 25:
-                break
-
-        return choices
-    except LookupError:
-        return []
-    except Exception:
-        logger.debug('Join-game autocomplete failed.', exc_info=True)
-        return []
-
-
-async def leaderboard_games_autocomplete(
-    interaction: Interaction,
-    current: str,
-) -> list[Choice[str]]:
-    """Suggest games whose leaderboard the user may view.
-
-    Order:
-    1. Recurring games the user participates in
-    2. Other games the user participates in
-    3. Other recurring public games
-    4. Other public games
-
-    Private games are only sourced from the user's own participation list.
-    """
-    try:
-        if _fe is None:
-            return []
-
-        try:
-            mine = _fe.list_my_games_ranked(interaction.user.id, include_ended=True)
-        except LookupError:
-            mine = []
-        try:
-            public = _fe.list_games_ranked(
-                include_public=True,
-                include_private=False,
-                include_open=True,
-                include_active=True,
-                include_ended=True,
-            )
-        except LookupError:
-            public = []
-
-        mine_ids = {str(game.id) for game, _count in mine}
-        my_recurring = [item for item in mine if item[0].template_id is not None]
-        my_other = [item for item in mine if item[0].template_id is None]
-        public_not_mine = [item for item in public if str(item[0].id) not in mine_ids]
-        other_recurring = [item for item in public_not_mine if item[0].template_id is not None]
-        other_public = [item for item in public_not_mine if item[0].template_id is None]
-
-        needle = current.strip().lower()
-        choices: list[Choice[str]] = []
-        for group, yours, recurring in (
-            (my_recurring, True, True),
-            (my_other, True, False),
-            (other_recurring, False, True),
-            (other_public, False, False),
-        ):
-            for game, _player_count in group:
-                game_id = str(game.id)
-                if needle and needle not in f"{game.name} {game_id}".lower():
-                    continue
-                tags = []
-                if yours:
-                    tags.append("YOUR GAME")
-                if recurring:
-                    tags.append("RECURRING")
-                suffix = f" [{' · '.join(tags)}]" if tags else ""
-                choices.append(
-                    Choice(
-                        name=f"{game.name} (ID: {game_id}){suffix}"[:100],
-                        value=game_id,
-                    )
-                )
-                if len(choices) >= 25:
-                    return choices
-        return choices
-    except Exception:
-        logger.debug('Leaderboard-game autocomplete failed.', exc_info=True)
-        return []
-
-
-async def owner_games_autocomplete(
-    interaction: Interaction,
-    current: str,
-) -> list[Choice[str]]:
-    return await game_id_autocomplete(interaction, current, owner_only=True)
-
-
-async def private_owner_games_autocomplete(
-    interaction: Interaction,
-    current: str,
-) -> list[Choice[str]]:
-    """Games the user owns that are private (for kick / pending flows)."""
-    try:
-        if _fe is None:
-            return []
-        user_games = _fe.my_games(interaction.user.id, include_ended=False)
-        needle = current.lower()
-        choices: list[Choice[str]] = []
-        for game in user_games.games:
-            if game.owner_id != interaction.user.id or not game.private_game:
-                continue
-            if game.status == 'ended':
-                continue
-            if needle and needle not in game.name.lower() and needle not in str(game.id):
-                continue
-            choices.append(
-                Choice(
-                    name=f"🔒 {game.name} (ID: {game.id})"[:100],
-                    value=str(game.id),
-                )
-            )
-            if len(choices) >= 25:
-                break
-        return choices
-    except LookupError:
-        return []
-    except Exception:
-        logger.debug('Private-owner game autocomplete failed.', exc_info=True)
-        return []
-
-
-async def game_info_autocomplete(
-    interaction: Interaction,
-    current: str,
-) -> list[Choice[str]]:
-    """Public games plus private games the user owns or actively plays."""
-    try:
-        if _fe is None:
-            return []
-
-        try:
-            mine = _fe.list_my_games_ranked(interaction.user.id, include_ended=True)
-        except LookupError:
-            mine = []
-        try:
-            public = _fe.list_games_ranked(
-                include_public=True,
-                include_private=False,
-                include_open=True,
-                include_active=True,
-                include_ended=True,
-            )
-        except LookupError:
-            public = []
-
-        accessible: list = []
-        seen: set[str] = set()
-        for game, count in mine:
-            if game.private_game:
-                try:
-                    participants = _fe.be.get_many_participants(
-                        game_id=game.id, user_id=interaction.user.id
-                    )
-                except LookupError:
-                    continue
-                if game.owner_id != interaction.user.id and not any(
-                    p.status == 'active' for p in participants
-                ):
-                    continue
-            gid = str(game.id)
-            if gid not in seen:
-                seen.add(gid)
-                accessible.append((game, count))
-        for game, count in public:
-            gid = str(game.id)
-            if gid not in seen:
-                seen.add(gid)
-                accessible.append((game, count))
-
-        needle = current.strip().lower()
-        choices: list[Choice[str]] = []
-        for game, _count in accessible:
-            game_id = str(game.id)
-            searchable = f"{game.name} {game_id}".lower()
-            if needle and needle not in searchable:
-                continue
-            recurring = "🔁 " if game.template_id is not None else ""
-            private = "🔒 " if game.private_game else ""
-            choices.append(
-                Choice(
-                    name=f"{private}{recurring}{game.name} (ID: {game_id})"[:100],
-                    value=game_id,
-                )
-            )
-            if len(choices) >= 25:
-                break
-        return choices
-    except Exception:
-        logger.debug('Game-info autocomplete failed.', exc_info=True)
         return []
