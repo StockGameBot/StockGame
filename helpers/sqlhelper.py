@@ -6,6 +6,7 @@ import functools
 import logging
 import re
 import sqlite3
+import threading
 from typing import Optional, Literal
 
 # EXTERNAL
@@ -55,6 +56,19 @@ def _iso8601(date_type:str='datetime'): #
     
     return now
 
+# One lock per database file — Frontend and GameLogic each hold a SqlHelper on the
+# same path; asyncio.to_thread also runs DB work on different pool threads.
+_db_locks: dict[str, threading.Lock] = {}
+_db_locks_guard = threading.Lock()
+
+def _lock_for_db(db_name: str) -> threading.Lock:
+    with _db_locks_guard:
+        lock = _db_locks.get(db_name)
+        if lock is None:
+            lock = threading.Lock()
+            _db_locks[db_name] = lock
+        return lock
+
 def open_and_close(func): #TODO MAKE THIS NOT AI
     """
     Decorator to open and close an SQLite connection around a method call.
@@ -66,6 +80,8 @@ def open_and_close(func): #TODO MAKE THIS NOT AI
         Wrapper function that manages the connection.
         'self' is the instance of the class where the decorated method is defined.
         """
+        db_lock = _lock_for_db(self.db)
+        db_lock.acquire()
         self._open_connection()  # Call the instance's open connection method
         try:
             # Call the original method (e.g., _sql_items)
@@ -79,7 +95,10 @@ def open_and_close(func): #TODO MAKE THIS NOT AI
             raise # Re-raise the exception after logging
         finally:
             # This block will always execute, ensuring the connection is closed
-            self._close_connection() # Call the instance's close connection method
+            try:
+                self._close_connection() # Call the instance's close connection method
+            finally:
+                db_lock.release()
     return wrapper
 
 class SqlHelper: # Simple helper for SQL
@@ -110,12 +129,21 @@ class SqlHelper: # Simple helper for SQL
         return value
     
     def _open_connection(self): # Start/open connection:
-            self.conn = sqlite3.connect(self.db)
+            self.conn = sqlite3.connect(
+                self.db,
+                timeout=30.0,
+                check_same_thread=False,
+            )
             self.cur = self.conn.cursor()
             self.cur.execute("PRAGMA foreign_keys = ON;")
+            self.cur.execute("PRAGMA journal_mode = WAL;")
+            self.cur.execute("PRAGMA busy_timeout = 30000;")
             
     def _close_connection(self): # Stop/close connection
-            self.conn.close()
+            if getattr(self, "conn", None) is not None:
+                self.conn.close()
+                self.conn = None
+                self.cur = None
     
     def _simple_status(self, status:MainStatus='success', reason:str='NA', result: str | int | dict | tuple | Exception | None=None, more_info:str | int | dict | tuple | Exception | None='NA')-> Status:
         """Simple status and results object
