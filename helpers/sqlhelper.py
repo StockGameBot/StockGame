@@ -116,6 +116,8 @@ class SqlHelper: # Simple helper for SQL
         self.logger = logging.getLogger('SqlHelper')
         self.logger.info('Logging for SqlHelper started')
         self.db = db_name
+        self.conn: sqlite3.Connection | None = None
+        self.cur: sqlite3.Cursor | None = None
         self._open_connection()
         self._close_connection()
 
@@ -140,8 +142,9 @@ class SqlHelper: # Simple helper for SQL
             self.cur.execute("PRAGMA busy_timeout = 30000;")
             
     def _close_connection(self): # Stop/close connection
-            if getattr(self, "conn", None) is not None:
-                self.conn.close()
+            conn = self.conn
+            if conn is not None:
+                conn.close()
                 self.conn = None
                 self.cur = None
     
@@ -162,6 +165,10 @@ class SqlHelper: # Simple helper for SQL
     def _run_query(self, query:str, values:Optional[list]=None, mode: str ='get')-> Status:
         if mode not in ['insert', 'insert_multi', 'update', 'delete', 'get', 'raw-get', 'ddl']:
             raise ValueError(f'Invalid mode {mode}.')
+        cur = self.cur
+        conn = self.conn
+        if cur is None or conn is None:
+            raise RuntimeError('Database connection is not open.')
         status = 'error' # Assume the request was no good to start
         reason = 'UNKNOWN ERROR'
         more_info = None
@@ -170,28 +177,28 @@ class SqlHelper: # Simple helper for SQL
             if mode == 'insert_multi': 
                 if not values:
                     raise ValueError('values required for multiple insert') # TODO maybe make this a status instead of a true error idk
-                resp = self.cur.executemany(query, values)
+                resp = cur.executemany(query, values)
             
             elif values:
-                resp = self.cur.execute(query, values)
+                resp = cur.execute(query, values)
             else: # Run without values, prevents error
-                resp = self.cur.execute(query)
-            self.conn.commit() # Commit changes, should only run if something happened
+                resp = cur.execute(query)
+            conn.commit() # Commit changes, should only run if something happened
             reason = 'VALID QUERY' # Assume query is valid (I love assuming)
             
             if mode == 'ddl':
                 result = None
             elif mode in ['insert', 'update', 'delete']: # Modify/change modes
-                if self.cur.rowcount > 0:
-                    result = self.cur.lastrowid # Get the last updated row ID
-                    more_info = f'{self.cur.rowcount} row effected' # Shows how many rows were effected by the last command
+                if cur.rowcount > 0:
+                    result = cur.lastrowid # Get the last updated row ID
+                    more_info = f'{cur.rowcount} row effected' # Shows how many rows were effected by the last command
                 else:
                     reason = 'NO ROWS EFFECTED'
                     more_info = 'Query valid, but no rows were returned'
             elif mode in ['get', 'raw-get']: # Get modes
-                resp = self.cur.fetchall()
+                resp = cur.fetchall()
                 if len(resp) > 0:
-                    result = self._format(resp, self.cur.description) if mode == 'get' else (resp, self.cur.description)
+                    result = self._format(resp, cur.description) if mode == 'get' else (resp, cur.description)
                     more_info = f'{len(resp)} rows found'
                 else: # The SQL query was valid, but no rows were returned
                     reason = 'NO ROWS RETURNED'

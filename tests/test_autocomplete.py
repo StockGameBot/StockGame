@@ -182,11 +182,55 @@ def test_leaderboard_autocomplete_groups_accessible_games():
     choices = asyncio.run(autocomplete.leaderboard_games_autocomplete(interaction, ""))
 
     assert [(choice.name, choice.value) for choice in choices] == [
-        ("My Monthly (ID: MYREC) [YOUR GAME · RECURRING]", "MYREC"),
-        ("My One Off (ID: MYONE) [YOUR GAME]", "MYONE"),
-        ("Public Monthly (ID: PUBRC) [RECURRING]", "PUBRC"),
+        ("🔁 My Monthly (ID: MYREC) [OWNER]", "MYREC"),
+        ("My One Off (ID: MYONE) [OWNER]", "MYONE"),
+        ("🔁 Public Monthly (ID: PUBRC)", "PUBRC"),
         ("Public One Off (ID: PUB01)", "PUB01"),
     ]
+
+
+def test_participant_autocomplete_marks_recurring_and_owner():
+    game = SimpleNamespace(
+        id="G1",
+        name="My Game",
+        owner_id=42,
+        template_id=7,
+        private_game=False,
+        status="active",
+    )
+    fake_frontend = SimpleNamespace(
+        my_games=lambda user_id, include_ended=False: SimpleNamespace(
+            games=[game],
+        ),
+    )
+    autocomplete.init_autocomplete(fake_frontend)
+    interaction = SimpleNamespace(user=SimpleNamespace(id=42))
+
+    choices = asyncio.run(autocomplete.all_games_autocomplete(interaction, ""))
+
+    assert [(choice.name, choice.value) for choice in choices] == [
+        ("🔁 My Game (ID: G1) [OWNER]", "G1"),
+    ]
+
+
+def test_private_owner_autocomplete_uses_shared_label():
+    game = SimpleNamespace(
+        id="P1",
+        name="Secret",
+        owner_id=42,
+        template_id=None,
+        private_game=True,
+        status="active",
+    )
+    fake_frontend = SimpleNamespace(
+        my_games=lambda user_id, include_ended=False: SimpleNamespace(games=[game]),
+    )
+    autocomplete.init_autocomplete(fake_frontend)
+    interaction = SimpleNamespace(user=SimpleNamespace(id=42))
+
+    choices = asyncio.run(autocomplete.private_owner_games_autocomplete(interaction, ""))
+
+    assert choices[0].name == "🔒 Secret (ID: P1) [OWNER]"
 
 
 def test_leaderboard_autocomplete_searches_name_and_id():

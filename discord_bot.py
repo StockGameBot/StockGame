@@ -35,6 +35,7 @@ from helpers.leaderboard_push import (
     push_all_recurring_leaderboards,
 )
 from helpers.recurring_leaderboard_image import get_recurring_generator
+from helpers import game_invites as gi
 import helpers.autocomplete as ac
 from helpers.logging_setup import (
     attach_critical_dm_bot,
@@ -538,7 +539,13 @@ async def create_game_advanced(
     except (InvalidDateFormatError, ValueError, TypeError) as exc:
         embed = discord.Embed(
             title="Game Creation Failed",
-            description=str(exc),
+            description=_game_creation_failure_description(exc),
+            color=discord.Color.red(),
+        )
+    except AlreadyExistsError as exc:
+        embed = discord.Embed(
+            title="Game Creation Failed",
+            description=_game_creation_failure_description(exc),
             color=discord.Color.red(),
         )
     except Exception as exc:
@@ -546,10 +553,173 @@ async def create_game_advanced(
         embed = simple_embed(
             status='failed',
             title='Game Creation Failed',
-            desc='Unable to create the game. Please check the supplied values and try again.',
+            desc=_game_creation_failure_description(exc),
         )
      
     await interaction.response.send_message(embed=embed, ephemeral=ephemeral_test)
+
+def _game_creation_failure_description(exc: BaseException) -> str:
+    """User-facing message for game creation failures."""
+    if isinstance(exc, AlreadyExistsError) and exc.table == 'games':
+        name = exc.duplicate or 'that name'
+        return f'A game named **{name}** already exists. Choose a different name.'
+    if isinstance(exc, AlreadyExistsError):
+        return exc.message or 'That item already exists.'
+    if isinstance(exc, (InvalidDateFormatError, ValueError, TypeError)):
+        return str(exc)
+    return 'Unable to create the game. Please check the supplied values and try again.'
+
+
+class _WizardRenameModal(discord.ui.Modal, title="Choose a different name"):
+    """Modal shown when the wizard game name collides with an existing game."""
+
+    def __init__(self, *, state: dict, message: discord.Message, initiator_id: int):
+        super().__init__(timeout=120)
+        self.state = state
+        self.message = message
+        self.initiator_id = initiator_id
+        self.name_input = discord.ui.TextInput(
+            label="New game name",
+            placeholder="Must be unique across all games",
+            default=str(state.get("name") or ""),
+            required=True,
+            max_length=name_cutoff,
+            min_length=3,
+        )
+        self.add_item(self.name_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.initiator_id:
+            await interaction.response.send_message(
+                "Only the person who started this wizard can rename the game.",
+                ephemeral=True,
+            )
+            return
+        self.state["name"] = self.name_input.value
+        await interaction.response.defer(ephemeral=True)
+        await _finalize_wizard_game_creation(
+            interaction,
+            self.state,
+            message=self.message,
+        )
+
+
+class _WizardRenameView(InitiatorOnlyView):
+    """Prompt after a name clash: open rename modal or cancel creation."""
+
+    def __init__(self, *, state: dict, message: discord.Message, initiator_id: int, taken_name: str):
+        super().__init__(initiator_id, timeout=120)
+        self.state = state
+        self.wizard_message = message
+        self.taken_name = taken_name
+
+    @discord.ui.button(label="Choose a new name", style=discord.ButtonStyle.primary, emoji="✏️")
+    async def choose_new_name(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.send_modal(
+            _WizardRenameModal(
+                state=self.state,
+                message=self.wizard_message,
+                initiator_id=self.initiator_id,
+            )
+        )
+
+    @discord.ui.button(label="Cancel creation", style=discord.ButtonStyle.danger)
+    async def cancel_creation(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=simple_embed(
+                status='success',
+                title='Game Creation Cancelled',
+                desc='No game was created.',
+            ),
+            view=None,
+        )
+        self.stop()
+
+
+async def _finalize_wizard_game_creation(
+    interaction: discord.Interaction,
+    state: dict,
+    *,
+    message: discord.Message,
+) -> None:
+    """Try to create the game from wizard state; on name clash offer rename."""
+    try:
+        game_id = fe.new_game(
+            user_id=state["user_id"],
+            name=state["name"],
+            start_date=state["start_date"],
+            end_date=state.get("end_date"),
+            pick_date=state.get("pick_date"),
+            starting_money=state["starting_money"],
+            total_picks=state["total_picks"],
+            exclusive_picks=state["exclusive_picks"],
+            private_game=state["private_game"],
+            update_frequency='alpaca',
+            sell_during_game=state.get("sell_during_game", False),
+        )
+        await message.edit(
+            embed=simple_embed(
+                status='success',
+                title='Game Created Successfully',
+                desc=f"Game '{state['name']}' has been created. Game ID: #{game_id}",
+            ),
+            view=None,
+        )
+    except AlreadyExistsError as exc:
+        if exc.table == 'games':
+            taken = str(exc.duplicate or state["name"])
+            await message.edit(
+                embed=discord.Embed(
+                    title="Game name already taken",
+                    description=(
+                        f"**{taken}** is already used by another game.\n\n"
+                        "Choose a new name to continue, or cancel to discard this setup."
+                    ),
+                    color=discord.Color.orange(),
+                ),
+                view=_WizardRenameView(
+                    state=state,
+                    message=message,
+                    initiator_id=state["user_id"],
+                    taken_name=taken,
+                ),
+            )
+            return
+        await message.edit(
+            embed=simple_embed(
+                status='failed',
+                title='Game Creation Failed',
+                desc=_game_creation_failure_description(exc),
+            ),
+            view=None,
+        )
+    except (InvalidDateFormatError, ValueError, TypeError) as exc:
+        await message.edit(
+            embed=simple_embed(
+                status='failed',
+                title='Game Creation Failed',
+                desc=_game_creation_failure_description(exc),
+            ),
+            view=None,
+        )
+    except Exception as exc:
+        logger.exception('Guided game creation failed', exc_info=exc)
+        await message.edit(
+            embed=simple_embed(
+                status='failed',
+                title='Game Creation Failed',
+                desc=_game_creation_failure_description(exc),
+            ),
+            view=None,
+        )
 
 # this code is a complete mess at the moment, trying to get it to work my way but it is taking more time than it's worth
 # THIS ITERATION IS WORKING IN THE CURRENT STATE
@@ -831,39 +1001,27 @@ async def create_game(interaction: discord.Interaction):
                                     ephemeral=True,
                                 )
                                 return
-                            try:
-                                game_id = fe.new_game(
-                                    user_id=confirm_interaction.user.id,
-                                    name=game_name,
-                                    start_date=game_start_date,
-                                    end_date=game_end_date,
-                                    pick_date=game_pick_date,
-                                    starting_money=game_starting_money,
-                                    total_picks=game_total_picks,
-                                    exclusive_picks=game_exclusive_picks,
-                                    private_game=private_game,
-                                    update_frequency='alpaca',
-                                    sell_during_game=sell_during_game,
-                                )
-                                creation_status_embed = simple_embed(
-                                    status='success',
-                                    title='Game Created Successfully',
-                                    desc=f"Game '{game_name}' has been created. Game ID: #{game_id}",
-                                )
-                            except (InvalidDateFormatError, ValueError, TypeError) as exc:
-                                creation_status_embed = simple_embed(
-                                    status='failed',
-                                    title='Game Creation Failed',
-                                    desc=str(exc),
-                                )
-                            except Exception as exc:
-                                logger.exception('Guided game creation failed', exc_info=exc)
-                                creation_status_embed = simple_embed(
-                                    status='failed',
-                                    title='Game Creation Failed',
-                                    desc='Unable to create the game. Please check the settings and try again.',
-                                )
-                            await confirm_interaction.response.edit_message(embed=creation_status_embed, view=None)
+                            wizard_state = {
+                                "user_id": confirm_interaction.user.id,
+                                "name": game_name,
+                                "start_date": game_start_date,
+                                "end_date": game_end_date,
+                                "pick_date": game_pick_date,
+                                "starting_money": game_starting_money,
+                                "total_picks": game_total_picks,
+                                "exclusive_picks": game_exclusive_picks,
+                                "private_game": private_game,
+                                "sell_during_game": sell_during_game,
+                            }
+                            await confirm_interaction.response.defer(ephemeral=True)
+                            message = confirm_interaction.message
+                            if message is None:
+                                message = await confirm_interaction.original_response()
+                            await _finalize_wizard_game_creation(
+                                confirm_interaction,
+                                wizard_state,
+                                message=message,
+                            )
 
                         async def cancel_callback(cancel_interaction: discord.Interaction):
                             if cancel_interaction.user.id != original_user:
@@ -1150,25 +1308,48 @@ async def join_game(
 ):
     status = 'failed'
     description = "failed"
+    title = "Game Join Failed"
     try:
         fe.register(user_id=interaction.user.id, username=interaction.user.display_name)
+        pending_invite = fe.get_pending_game_invite(interaction.user.id, game_id)
+        try:
+            game = fe.be.get_game(game_id)
+            force_active = pending_invite is not None and game.private_game
+        except LookupError:
+            force_active = False
         fe.join_game(
-            user_id=interaction.user.id, 
-            game_id=game_id
+            user_id=interaction.user.id,
+            game_id=game_id,
+            force_active=force_active,
         )
 
         game_name = fe._get_game_name(game_id)
         title = "Game Joined Successfully"
         description = f"You have joined **{game_name}** (#{game_id})."
         status = 'success'
-        # Private games create a pending participant until the owner approves it.
+        participant_status = 'active'
         try:
             participants = fe.be.get_many_participants(user_id=interaction.user.id, game_id=game_id)
+            if participants:
+                participant_status = participants[0].status
             if participants and participants[0].status == 'pending':
                 title = "Join Request Submitted"
                 description = f"Your request to join **{game_name}** (#{game_id}) is pending. The owner must approve it before you can play."
         except LookupError:
             logger.warning('Could not verify join status for user %s in game %s.', interaction.user.id, game_id)
+
+        if pending_invite:
+            fe.finalize_game_invite(game_id=game_id, user_id=interaction.user.id, status='accepted')
+            await gi.edit_invite_dm(
+                interaction.client,
+                dm_channel_id=pending_invite.dm_channel_id,
+                dm_message_id=pending_invite.dm_message_id,
+                embed=gi.build_join_result_embed(
+                    game_name=game_name,
+                    game_id=game_id,
+                    participant_status=participant_status,
+                ),
+            )
     except LookupError:
         description = f'No game with the ID {game_id}.'
         
@@ -1389,92 +1570,32 @@ async def invite_user(
         )
         return
 
-    invite_embed = discord.Embed(
-        title="Game Invite",
-        description=f"You have been invited to **{invited_game.name}** (#{game_id}) by {interaction.user.display_name}.",
-        color=discord.Color.green()
+    invite_embed = gi.build_invite_embed(
+        invited_game.name,
+        game_id,
+        interaction.user.display_name,
     )
 
-    accept_button = discord.ui.Button(
-        label="Accept Invite",
-        style=discord.ButtonStyle.success,
-        custom_id="accept_invite",
-        emoji="✅"
+    view = gi.GameInviteView(
+        fe=fe,
+        game_id=game_id,
+        invitee_id=user.id,
+        game_name=invited_game.name,
+        inviter_name=interaction.user.display_name,
+        private_game=bool(invited_game.private_game),
     )
-
-    decline_button = discord.ui.Button(
-        label="Decline Invite",
-        style=discord.ButtonStyle.danger,
-        custom_id="decline_invite",
-        emoji="❌"
-    )
-
-    view = discord.ui.View()
-    view.add_item(accept_button)    
-    view.add_item(decline_button)
-
-    async def accept_invite_callback(button_interaction: discord.Interaction):
-        # Validate that the clicker is the invited user
-        if button_interaction.user.id != user.id:
-            await button_interaction.response.send_message(
-                "This invite was not meant for you.", ephemeral=True
-            )
-            return
-
-        try:
-            fe.register(user_id=user.id, username=user.display_name)
-            fe.join_game(
-                user_id=user.id,
-                game_id=game_id,
-                force_active=bool(invited_game.private_game),
-            )
-            participant = fe.be.get_many_participants(user_id=user.id, game_id=game_id)[0]
-            if participant.status == 'pending':
-                title = 'Join Request Submitted'
-                description = 'Your request is pending owner approval before you can play.'
-            else:
-                title = 'Game Joined'
-                description = f'You joined **{invited_game.name}** (#{game_id}).'
-            accept_embed = discord.Embed(
-                title=title,
-                description=description,
-                color=discord.Color.green(),
-            )
-        except ValueError as exc:
-            message = str(exc)
-            if 'already in game' in message.lower():
-                message = 'You are already participating in this game.'
-            elif 'pick_date' in message.lower():
-                message = 'The pick deadline for this game has passed.'
-            accept_embed = simple_embed(status='failed', title='Game Join Failed', desc=message)
-        except LookupError:
-            accept_embed = simple_embed(status='failed', title='Game Join Failed', desc='This game is no longer available.')
-        except Exception as exc:
-            logger.exception('Invite acceptance failed for user %s and game %s.', user.id, game_id, exc_info=exc)
-            accept_embed = discord.Embed(
-                title="Game Join Failed",
-                description='Unable to join the game. Please try again or contact a moderator.',
-                color=discord.Color.red(),
-            )
-
-        await button_interaction.response.edit_message(embed=accept_embed, view=None)
-
-    async def decline_invite_callback(interaction: discord.Interaction):
-        if interaction.user.id != user.id:
-            await interaction.response.send_message("This invite was not meant for you.", ephemeral=True)
-            return
-        decline_embed = discord.Embed(
-            title="Invite Declined",
-            description=f"You have declined the invite to game #{game_id}.",
-            color=discord.Color.red()
-        )
-        await interaction.response.edit_message(embed=decline_embed, view=None)
-
-    accept_button.callback = accept_invite_callback  # type: ignore[assignment]
-    decline_button.callback = decline_invite_callback
 
     try:
-        await user.send(embed=invite_embed, view=view)
+        dm_message = await user.send(embed=invite_embed, view=view)
+        view.message = dm_message
+        _invite, previous_invite = fe.record_game_invite(
+            game_id=game_id,
+            user_id=user.id,
+            inviter_id=interaction.user.id,
+            dm_channel_id=dm_message.channel.id,
+            dm_message_id=dm_message.id,
+        )
+        await gi.expire_superseded_invite_dm(bot, fe, previous_invite)
         await interaction.followup.send(
             embed=discord.Embed(
                 title='Invite Sent',
@@ -2604,11 +2725,26 @@ def _leaderboard_game_data(
     }
 
 
-def _game_info_embed(game, participant_count: int) -> discord.Embed:
+def _game_info_embed(
+    game,
+    participant_count: int,
+    *,
+    viewer_user_id: int | None = None,
+) -> discord.Embed:
     """Complete user-facing game configuration without decorative emoji."""
     aggregate = float(game.current_value or 0)
     dollars = float(game.change_dollars or 0)
     percent = float(game.change_percent or 0)
+    pending_line = ''
+    if (
+        viewer_user_id is not None
+        and game.private_game
+        and game.owner_id == viewer_user_id
+    ):
+        pending = fe.count_pending_participants(game.id)
+        if pending > 0:
+            label = 'user' if pending == 1 else 'users'
+            pending_line = f"\nPending join requests: **{pending}** {label} — `/manage-pending`"
     embed = discord.Embed(
         title=f"{game.name} ({game.id})",
         color=discord.Color.blurple(),
@@ -2621,6 +2757,7 @@ def _game_info_embed(game, participant_count: int) -> discord.Embed:
             f"Participants: {participant_count}\n"
             f"Visibility: {'Private' if game.private_game else 'Public'}\n"
             f"Recurring template: {game.template_id if game.template_id is not None else 'No'}"
+            f"{pending_line}"
         ),
         inline=True,
     )
@@ -3020,7 +3157,11 @@ async def game_info(
                 _leaderboard_game_data(
                     game,
                     leaderboard,
-                    embed=_game_info_embed(game, len(leaderboard)),
+                    embed=_game_info_embed(
+                        game,
+                        len(leaderboard),
+                        viewer_user_id=interaction.user.id,
+                    ),
                 )
             ],
             show_game_controls=False,
@@ -3044,11 +3185,23 @@ async def game_info(
 
 # TODO add buttons for joining games?
 # TODO add a joinable parameter?
+def _pending_join_notice(game, viewer_user_id: int | None) -> str:
+    """Bold pending line for private games the viewer owns; empty when none."""
+    if viewer_user_id is None or not game.private_game or game.owner_id != viewer_user_id:
+        return ''
+    pending = fe.count_pending_participants(game.id)
+    if pending <= 0:
+        return ''
+    label = 'approval' if pending == 1 else 'approvals'
+    return f'\n> **Pending {label}:** **{pending}** — use `/manage-pending`'
+
+
 def _format_listed_game(
     game,
     player_count: int,
     *,
     status_emoji: str | None = None,
+    viewer_user_id: int | None = None,
 ) -> tuple[str, str]:
     """Shared title/body formatting for /game-list and /my-games."""
     pick_line = (
@@ -3068,6 +3221,7 @@ def _format_listed_game(
         f'> **Start date:** `{game.start_date}`\n'
         f'{pick_line}'
         f'{end_line}'
+        f'{_pending_join_notice(game, viewer_user_id)}'
     )
     return title, body
 
@@ -3091,6 +3245,7 @@ async def game_list(
             include_open=True,
             include_active=True,
             owner_id=owner.id if owner else None,
+            viewer_user_id=None if owner else interaction.user.id,
         )
 
         title = "Currently running games"
@@ -3098,7 +3253,11 @@ async def game_list(
             title = f"Games owned by {owner.display_name}"
         embed = discord.Embed(title=title, description="")
         formatted_games = [
-            _format_listed_game(game, player_count)
+            _format_listed_game(
+                game,
+                player_count,
+                viewer_user_id=interaction.user.id,
+            )
             for game, player_count in ranked
         ]
         await Pagination(interaction, page_len=page_length, embed=embed, games=formatted_games, ephemeral=ephemeral_test).navigate()
@@ -3142,6 +3301,7 @@ async def my_games(
                 game,
                 player_count,
                 status_emoji=fe.game_status_emoji(game, today),
+                viewer_user_id=interaction.user.id,
             )
             for game, player_count in ranked
         ]
@@ -3203,8 +3363,8 @@ async def about(
     interaction: discord.Interaction,
 ):
     creators = "<@163784331804934144>: Project Leader, Coordinated Strategic Management Lead, Frontend Dev, Backend Dev, gave the idea for the about command" \
-    "\n<@329374393715392520>: Frontend Dev, Bot Dev, made really big bot commits" \
-    "\n<@1240817181692792934>: Bot Dev, made the about command, strategy consultant"
+    "\n<@329374393715392520>: Assistant to the Project Leader, Frontend Dev, Bot Dev, Prompt Engineer, made really big bot commits" \
+    "\n<@1240817181692792934>: Strategy Consultant, Bot Dev, made the about command"
 
     embed = discord.Embed(title="About the bot", description="[StockBot](https://github.com/ItsJustAGitHubMichealWhosGonnaSeeIt5Ppl/StockGame) is a discord bot that simulates the purchase of stocks and runs them in a gamified format. Originally built for the Lemonade Stand community.")
     embed.add_field(name="Creators", value=creators)

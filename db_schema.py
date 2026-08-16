@@ -26,14 +26,38 @@ logger = logging.getLogger("DbSchema")
 # # (YYYY-MM-DD HH:MM:SS) objects should include 'datetime' in the key name
 # # (YYYY-MM-DD) objects should include 'date' in the key name
 
-db_ver = "0.2.1"  # Current schema version
+db_ver = "0.2.2"  # Current schema version
 
 # (from_version, to_version) -> migration function that mutates ``db_name`` in place.
 # When no entry matches a version jump, :func:`ensure_database` remakes empty.
 MigrationFn = Callable[[str], None]
+def _migrate_0_2_1_to_0_2_2(db_name: str) -> None:
+    """Add ``game_invites`` for DM invite tracking and slash-command joins."""
+    conn = sqlite3.connect(db_name)
+    try:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS game_invites (
+                invite_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                inviter_id INTEGER NOT NULL,
+                dm_channel_id INTEGER,
+                dm_message_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending',
+                datetime_created TEXT NOT NULL,
+                datetime_updated TEXT,
+                FOREIGN KEY (game_id) REFERENCES games (game_id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
+                UNIQUE (game_id, user_id)
+            );"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 MIGRATIONS: dict[tuple[str, str], MigrationFn] = {
-    # Example:
-    # ("0.2.0", "0.2.1"): _migrate_0_2_0_to_0_2_1,
+    ("0.2.1", "0.2.2"): _migrate_0_2_1_to_0_2_2,
 }
 
 
@@ -178,7 +202,7 @@ def ensure_database(db_name: str, *, target_version: str = db_ver) -> str:
 def create(db_name:str, upgrade:bool=True):
     """Create database schema tables.
 
-    Version: 0.2.1
+    Version: 0.2.2
 
     Args:
         db_name (str): Database name
@@ -186,6 +210,10 @@ def create(db_name:str, upgrade:bool=True):
             ``db_ver``, run :func:`ensure_database` (migrate or remake). Defaults to True.
 
     # Changelog
+
+    ## [0.2.2] - 2026-08-16
+    ### Added
+    - ``game_invites`` table for pending DM game invites
 
     ## [0.2.1] - 2026-08-05
     ### Removed
@@ -378,6 +406,21 @@ def create(db_name:str, upgrade:bool=True):
         FOREIGN KEY (stock_id) REFERENCES stocks (stock_id) ON DELETE RESTRICT, -- Don't delete a stock if picks exist? Or CASCADE? Depends on desired behavior. RESTRICT is safer.
         
         UNIQUE (participation_id, stock_id) -- User picks a specific stock only once per game participation
+        );""")
+
+    cursor.execute("""CREATE TABLE IF NOT EXISTS game_invites (
+        invite_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id TEXT NOT NULL,
+        user_id INTEGER NOT NULL,
+        inviter_id INTEGER NOT NULL,
+        dm_channel_id INTEGER,
+        dm_message_id INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending',
+        datetime_created TEXT NOT NULL,
+        datetime_updated TEXT,
+        FOREIGN KEY (game_id) REFERENCES games (game_id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
+        UNIQUE (game_id, user_id)
         );""")
 
     # Idempotent "days in first" awards per NYSE trade date
