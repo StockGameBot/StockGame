@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 # Hardcoded recipients for CRITICAL operational alerts (Discord user snowflakes).
 CRITICAL_ALERT_USER_IDS: list[int] = [
     329374393715392520,
+    1240817181692792934,
+    163784331804934144,
 ]
 
 LOG_FORMAT = "%(asctime)s %(name)s %(levelname)s %(message)s"

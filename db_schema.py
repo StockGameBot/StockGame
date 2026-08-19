@@ -26,7 +26,7 @@ logger = logging.getLogger("DbSchema")
 # # (YYYY-MM-DD HH:MM:SS) objects should include 'datetime' in the key name
 # # (YYYY-MM-DD) objects should include 'date' in the key name
 
-db_ver = "0.2.2"  # Current schema version
+db_ver = "0.2.3"  # Current schema version
 
 # (from_version, to_version) -> migration function that mutates ``db_name`` in place.
 # When no entry matches a version jump, :func:`ensure_database` remakes empty.
@@ -56,8 +56,42 @@ def _migrate_0_2_1_to_0_2_2(db_name: str) -> None:
         conn.close()
 
 
+def _migrate_0_2_2_to_0_2_3(db_name: str) -> None:
+    """Add recurring auto top-role tracking and template flag."""
+    conn = sqlite3.connect(db_name)
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(game_templates)")}
+        if "auto_top_roles" not in cols:
+            conn.execute(
+                "ALTER TABLE game_templates ADD COLUMN auto_top_roles INTEGER NOT NULL DEFAULT 0"
+            )
+        game_cols = {row[1] for row in conn.execute("PRAGMA table_info(games)")}
+        if "top_roles_applied" not in game_cols:
+            conn.execute(
+                "ALTER TABLE games ADD COLUMN top_roles_applied INTEGER NOT NULL DEFAULT 0"
+            )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS template_role_holders (
+                template_id INTEGER NOT NULL,
+                rank INTEGER NOT NULL CHECK(rank IN (1, 2, 3)),
+                user_id INTEGER NOT NULL,
+                game_id TEXT NOT NULL,
+                datetime_awarded TEXT NOT NULL,
+                PRIMARY KEY (template_id, rank),
+                FOREIGN KEY (template_id) REFERENCES game_templates (template_id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users (user_id),
+                FOREIGN KEY (game_id) REFERENCES games (game_id) ON DELETE CASCADE
+            );"""
+        )
+        conn.execute("UPDATE games SET top_roles_applied = 1 WHERE status = 'ended'")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 MIGRATIONS: dict[tuple[str, str], MigrationFn] = {
     ("0.2.1", "0.2.2"): _migrate_0_2_1_to_0_2_2,
+    ("0.2.2", "0.2.3"): _migrate_0_2_2_to_0_2_3,
 }
 
 
@@ -202,7 +236,7 @@ def ensure_database(db_name: str, *, target_version: str = db_ver) -> str:
 def create(db_name:str, upgrade:bool=True):
     """Create database schema tables.
 
-    Version: 0.2.2
+    Version: 0.2.3
 
     Args:
         db_name (str): Database name
@@ -210,6 +244,12 @@ def create(db_name:str, upgrade:bool=True):
             ``db_ver``, run :func:`ensure_database` (migrate or remake). Defaults to True.
 
     # Changelog
+
+    ## [0.2.3] - 2026-08-19
+    ### Added
+    - ``auto_top_roles`` on game_templates
+    - ``top_roles_applied`` on games
+    - ``template_role_holders`` table for recurring top-3 Discord roles
 
     ## [0.2.2] - 2026-08-16
     ### Added
@@ -306,6 +346,7 @@ def create(db_name:str, upgrade:bool=True):
         game_length INTEGER DEFAULT 1,                        -- How many months should the game last. 0 = infinite game
         push_leaderboard INTEGER NOT NULL DEFAULT 0,          -- Auto-push leaderboard image to a channel
         leaderboard_channel_id TEXT DEFAULT NULL,             -- Discord channel snowflake as text
+        auto_top_roles INTEGER NOT NULL DEFAULT 0,          -- Auto-assign 1st/2nd/3rd roles when each game ends
         datetime_created TEXT NOT NULL,                       -- ISO8601 (YYYY-MM-DD HH:MM:SS)
         last_updated TEXT DEFAULT NULL,                       -- ISO8601 (YYYY-MM-DD HH:MM:SS)
         
@@ -333,6 +374,7 @@ def create(db_name:str, upgrade:bool=True):
         change_dollars REAL DEFAULT NULL,
         change_percent REAL DEFAULT NULL,
         leaderboard_message_id TEXT DEFAULT NULL,             -- Comma-separated Discord message snowflakes for push page edits
+        top_roles_applied INTEGER NOT NULL DEFAULT 0,         -- Recurring auto top-role processing done
         datetime_created TEXT NOT NULL,                       -- ISO8601 (YYYY-MM-DD HH:MM:SS)
         last_updated TEXT DEFAULT NULL,                       -- ISO8601 (YYYY-MM-DD HH:MM:SS)
         
@@ -421,6 +463,18 @@ def create(db_name:str, upgrade:bool=True):
         FOREIGN KEY (game_id) REFERENCES games (game_id) ON DELETE CASCADE,
         FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
         UNIQUE (game_id, user_id)
+        );""")
+
+    cursor.execute("""CREATE TABLE IF NOT EXISTS template_role_holders (
+        template_id INTEGER NOT NULL,
+        rank INTEGER NOT NULL CHECK(rank IN (1, 2, 3)),
+        user_id INTEGER NOT NULL,
+        game_id TEXT NOT NULL,
+        datetime_awarded TEXT NOT NULL,
+        PRIMARY KEY (template_id, rank),
+        FOREIGN KEY (template_id) REFERENCES game_templates (template_id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users (user_id),
+        FOREIGN KEY (game_id) REFERENCES games (game_id) ON DELETE CASCADE
         );""")
 
     # Idempotent "days in first" awards per NYSE trade date

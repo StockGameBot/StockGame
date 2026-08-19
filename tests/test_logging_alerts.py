@@ -34,6 +34,20 @@ from helpers.logging_setup import (
 
 
 ALLOWED_CRITICAL_USER = 329374393715392520
+EXPECTED_CRITICAL_USER_IDS = [
+    329374393715392520,
+    1240817181692792934,
+    163784331804934144,
+]
+
+
+def _critical_recipient_mocks() -> dict[int, MagicMock]:
+    users: dict[int, MagicMock] = {}
+    for uid in EXPECTED_CRITICAL_USER_IDS:
+        user = MagicMock()
+        user.send = AsyncMock()
+        users[uid] = user
+    return users
 
 
 @pytest.fixture(autouse=True)
@@ -63,9 +77,9 @@ def _ready_bot(*, users: dict[int, MagicMock] | None = None):
 
 
 def test_critical_alert_recipients_are_hardcoded_allowlist_only():
-    assert CRITICAL_ALERT_USER_IDS == [ALLOWED_CRITICAL_USER]
-    assert ALLOWED_CRITICAL_USER not in (0, None)
-    assert len(CRITICAL_ALERT_USER_IDS) == 1
+    assert CRITICAL_ALERT_USER_IDS == EXPECTED_CRITICAL_USER_IDS
+    assert all(uid not in (0, None) for uid in CRITICAL_ALERT_USER_IDS)
+    assert len(CRITICAL_ALERT_USER_IDS) == 3
 
 
 def test_dual_log_files_split_levels(tmp_path):
@@ -145,14 +159,13 @@ def test_info_and_error_do_not_dm(tmp_path):
 def test_critical_dm_only_to_allowlisted_user(tmp_path):
     setup_app_logging(log_dir=str(tmp_path / "logs"), force=True, console_level=logging.CRITICAL)
 
-    allowed = MagicMock()
-    allowed.send = AsyncMock()
+    recipients = _critical_recipient_mocks()
     stranger = MagicMock()
     stranger.send = AsyncMock()
 
     bot = _ready_bot(
         users={
-            ALLOWED_CRITICAL_USER: allowed,
+            **recipients,
             111111111111111111: stranger,
         }
     )
@@ -161,7 +174,7 @@ def test_critical_dm_only_to_allowlisted_user(tmp_path):
     attach_critical_dm_bot(bot)
     handler = get_critical_handler()
     assert handler is not None
-    assert handler.user_ids == [ALLOWED_CRITICAL_USER]
+    assert handler.user_ids == EXPECTED_CRITICAL_USER_IDS
 
     logging.getLogger("CritPath").critical("simulated CRITICAL operational failure")
     assert len(handler._pending) == 1
@@ -169,13 +182,14 @@ def test_critical_dm_only_to_allowlisted_user(tmp_path):
     bot.is_ready.return_value = True
     bot.loop.run_until_complete(flush_critical_dm_queue())
 
-    allowed.send.assert_awaited()
+    for user in recipients.values():
+        user.send.assert_awaited()
     stranger.send.assert_not_called()
     fetch_ids = [c.args[0] for c in bot.fetch_user.await_args_list]
     get_ids = [c.args[0] for c in bot.get_user.call_args_list]
-    assert all(uid == ALLOWED_CRITICAL_USER for uid in fetch_ids + get_ids)
+    assert set(fetch_ids + get_ids) == set(EXPECTED_CRITICAL_USER_IDS)
 
-    content = allowed.send.await_args.args[0]
+    content = next(iter(recipients.values())).send.await_args.args[0]
     assert "CRITICAL alert" in content
     assert "simulated CRITICAL operational failure" in content
 
@@ -185,13 +199,12 @@ def test_critical_dm_only_to_allowlisted_user(tmp_path):
 def test_critical_queued_before_ready_then_flushed_only_to_allowlist(tmp_path):
     setup_app_logging(log_dir=str(tmp_path / "logs"), force=True, console_level=logging.CRITICAL)
 
-    allowed = MagicMock()
-    allowed.send = AsyncMock()
+    recipients = _critical_recipient_mocks()
     bot = MagicMock()
     bot.is_ready.return_value = False
     bot.loop = None
-    bot.get_user.side_effect = lambda uid: allowed if uid == ALLOWED_CRITICAL_USER else None
-    bot.fetch_user = AsyncMock(return_value=allowed)
+    bot.get_user.side_effect = lambda uid: recipients.get(uid)
+    bot.fetch_user = AsyncMock(side_effect=lambda uid: recipients[uid])
 
     attach_critical_dm_bot(bot)
     logging.getLogger("EarlyCrit").critical("queued before bot ready")
@@ -199,15 +212,17 @@ def test_critical_queued_before_ready_then_flushed_only_to_allowlist(tmp_path):
     handler = get_critical_handler()
     assert handler is not None
     assert len(handler._pending) == 1
-    allowed.send.assert_not_called()
+    for user in recipients.values():
+        user.send.assert_not_called()
 
     bot.is_ready.return_value = True
     bot.loop = asyncio.new_event_loop()
     bot.loop.run_until_complete(flush_critical_dm_queue())
 
-    allowed.send.assert_awaited_once()
+    for user in recipients.values():
+        user.send.assert_awaited_once()
     assert handler._pending == []
-    content = allowed.send.await_args.args[0]
+    content = next(iter(recipients.values())).send.await_args.args[0]
     assert "queued before bot ready" in content
     bot.loop.close()
 
@@ -216,9 +231,10 @@ def test_critical_dm_failure_is_logged_not_raised(tmp_path):
     log_dir = tmp_path / "logs"
     setup_app_logging(log_dir=str(log_dir), force=True, console_level=logging.CRITICAL)
 
-    flaky = MagicMock()
+    recipients = _critical_recipient_mocks()
+    flaky = recipients[ALLOWED_CRITICAL_USER]
     flaky.send = AsyncMock(side_effect=RuntimeError("DM blocked"))
-    bot = _ready_bot(users={ALLOWED_CRITICAL_USER: flaky})
+    bot = _ready_bot(users=recipients)
     attach_critical_dm_bot(bot)
 
     bot.loop.run_until_complete(
@@ -251,9 +267,9 @@ def test_discord_bot_critical_paths_use_allowlisted_logging(tmp_path, monkeypatc
 
     importlib.reload(db)
 
-    allowed = MagicMock()
-    allowed.send = AsyncMock()
-    bot = _ready_bot(users={ALLOWED_CRITICAL_USER: allowed})
+    recipients = _critical_recipient_mocks()
+    allowed = recipients[ALLOWED_CRITICAL_USER]
+    bot = _ready_bot(users=recipients)
     bot.is_ready.return_value = False
     reset_logging_for_tests()
     setup_app_logging(log_dir=str(tmp_path / "logs"), force=True, console_level=logging.CRITICAL)
