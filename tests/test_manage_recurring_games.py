@@ -232,6 +232,34 @@ def test_build_embed_shows_stopped_status(db_mod, fe):
         assert "Stopped" in embed.description
         assert embed.color == db_mod.discord.Color.dark_grey()
 
+
+def test_enable_auto_roles_updates_template(db_mod, fe):
+    templates = _two_templates(fe)
+
+    async def body():
+        view = db_mod.RecurringTemplateManager(_mock_interaction(), templates)
+        assert "Enable Auto Roles" in _button_labels(view)
+        click = _mock_interaction()
+        await view._enable_auto_roles(click)
+        assert fe.be.get_game_template(templates[0].id).auto_top_roles is True
+        assert "Disable Auto Roles" in _button_labels(view)
+
+    _run_view_test(body)
+
+
+def test_disable_auto_roles_strips_and_updates(db_mod, fe, mocker):
+    templates = _two_templates(fe)
+    fe.be.update_game_template(template_id=templates[0].id, auto_top_roles=True)
+    templates[0] = fe.be.get_game_template(templates[0].id)
+    strip_mock = mocker.patch.object(db_mod, "strip_template_top_roles", new_callable=AsyncMock)
+
+    async def body():
+        view = db_mod.RecurringTemplateManager(_mock_interaction(), templates)
+        click = _mock_interaction()
+        await view._disable_auto_roles(click)
+        strip_mock.assert_awaited_once()
+        assert fe.be.get_game_template(templates[0].id).auto_top_roles is False
+
     _run_view_test(body)
 
 

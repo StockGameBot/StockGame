@@ -58,6 +58,7 @@ class Game(BaseModel):
     change_dollars: Optional[float] = None
     change_percent: Optional[float] = None
     leaderboard_message_id: Optional[str] = None
+    top_roles_applied: bool = False
     datetime_created: datetime # YYYY-MM-DD HH:MM:SS
     last_updated: Optional[datetime] = Field(default=None, validation_alias=AliasChoices('datetime_updated', 'last_updated')) # YYYY-MM-DD HH:MM:SS
 
@@ -88,6 +89,7 @@ class GameTemplate(BaseModel):
     game_length: int
     push_leaderboard: bool = False
     leaderboard_channel_id: Optional[str] = None
+    auto_top_roles: bool = False
     datetime_created: datetime # YYYY-MM-DD HH:MM:SS
     last_updated: Optional[datetime] = None # YYYY-MM-DD HH:MM:SS
 
@@ -98,6 +100,19 @@ class GameTemplate(BaseModel):
         return value
 
 GameTemplates = TypeAdapter(list[GameTemplate])
+
+
+class TemplateRoleHolder(BaseModel):
+    model_config = ConfigDict(extra='ignore')
+
+    template_id: int
+    rank: int
+    user_id: int
+    game_id: str
+    datetime_awarded: datetime
+
+
+TemplateRoleHolders = TypeAdapter(list[TemplateRoleHolder])
 
 # Stock
 class Stock(BaseModel):

@@ -34,6 +34,7 @@ from helpers.leaderboard_push import (
     fingerprint_image_rows,
     push_all_recurring_leaderboards,
 )
+from helpers.recurring_top_roles import sync_recurring_top_roles, strip_template_top_roles
 from helpers.recurring_leaderboard_image import get_recurring_generator
 from helpers import game_invites as gi
 import helpers.autocomplete as ac
@@ -415,6 +416,7 @@ async def _run_update_and_push(*, force: bool = False) -> None:
     else:
         await asyncio.to_thread(fe.gl.update_all)
     await push_all_recurring_leaderboards(bot, fe, name_resolver=resolve_player_name)
+    await sync_recurring_top_roles(bot, fe)
 
 
 @tasks.loop(minutes=15)
@@ -1156,6 +1158,7 @@ class LeaderboardChannelSelect(discord.ui.View):
     total_picks="Maximum number of picks per player (optional, default: 10)",
     exclusive_picks="Enable exclusive picks: each stock can only be picked once (optional, default: False)",
     push_leaderboard="Post/edit a live leaderboard image in a channel (default: False)",
+    auto_top_roles="Assign 1st/2nd/3rd roles when each game ends (default: False)",
 )
 async def create_recurring_game(
     interaction: discord.Interaction,
@@ -1170,6 +1173,7 @@ async def create_recurring_game(
     total_picks: app_commands.Range[int, 1, 1000] = 10,
     exclusive_picks: bool = False,
     push_leaderboard: bool = False,
+    auto_top_roles: bool = False,
 ):
         """Create a recurring game template"""
 
@@ -1223,6 +1227,8 @@ async def create_recurring_game(
                 exclusive_picks=exclusive_picks,
                 sell_during_game=False,  # selling not implemented; keep default off
             )
+            if auto_top_roles:
+                fe.be.update_game_template(template_id=template_id, auto_top_roles=True)
 
             embed = discord.Embed(
                 title="✅ Recurring Game Template Created!",
@@ -1255,6 +1261,11 @@ async def create_recurring_game(
             embed.add_field(
                 name="📣 Push Leaderboard",
                 value="Choose a channel below" if push_leaderboard else "No",
+                inline=True,
+            )
+            embed.add_field(
+                name="🏆 Auto Top Roles",
+                value="Yes" if auto_top_roles else "No",
                 inline=True,
             )
             if private_game:
@@ -1842,6 +1853,14 @@ class RecurringTemplateManager(discord.ui.View):
             push_btn.callback = self._enable_push  # type: ignore[method-assign]
             channel_btn = None
 
+        auto_roles_on = bool(self.templates and self.templates[self.index].auto_top_roles)
+        if auto_roles_on:
+            auto_roles_btn = discord.ui.Button(label="Disable Auto Roles", style=discord.ButtonStyle.secondary)
+            auto_roles_btn.callback = self._disable_auto_roles  # type: ignore[method-assign]
+        else:
+            auto_roles_btn = discord.ui.Button(label="Enable Auto Roles", style=discord.ButtonStyle.success)
+            auto_roles_btn.callback = self._enable_auto_roles  # type: ignore[method-assign]
+
         prev_btn.callback = self._previous  # type: ignore[method-assign]
         next_btn.callback = self._next  # type: ignore[method-assign]
         delete_btn.callback = self._ask_delete  # type: ignore[method-assign]
@@ -1851,6 +1870,7 @@ class RecurringTemplateManager(discord.ui.View):
         self.add_item(push_btn)
         if channel_btn is not None:
             self.add_item(channel_btn)
+        self.add_item(auto_roles_btn)
         self.add_item(delete_btn)
 
     def _pick_deadline_text(self, template) -> str:
@@ -1898,6 +1918,8 @@ class RecurringTemplateManager(discord.ui.View):
             ch = template.leaderboard_channel_id
             push_txt = f"On → <#{ch}>" if ch else "On (no channel yet)"
         embed.add_field(name="📣 Push Leaderboard", value=push_txt, inline=False)
+        roles_txt = "On" if template.auto_top_roles else "Off"
+        embed.add_field(name="🏆 Auto Top Roles", value=roles_txt, inline=True)
         if self.interaction.user.id != template.owner_id:
             embed.add_field(name="👤 Owner", value=f"<@{template.owner_id}>", inline=True)
         embed.set_footer(text=f"Template ID: {template.id}")
@@ -2055,6 +2077,37 @@ class RecurringTemplateManager(discord.ui.View):
             logger.exception("disable push failed | template_id=%s", template.id, exc_info=exc)
             await interaction.response.send_message("❌ Failed to disable push.", ephemeral=True)
 
+    async def _enable_auto_roles(self, interaction: discord.Interaction) -> None:
+        template = self.templates[self.index]
+        try:
+            fe.be.update_game_template(template_id=template.id, auto_top_roles=True)
+            self.templates[self.index] = fe.be.get_game_template(template.id)
+            self._sync_buttons()
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
+            await interaction.followup.send(
+                f"🏆 Auto top roles enabled for **{template.name}**.",
+                ephemeral=True,
+            )
+        except Exception as exc:
+            logger.exception("enable auto roles failed | template_id=%s", template.id, exc_info=exc)
+            await interaction.response.send_message("❌ Failed to enable auto top roles.", ephemeral=True)
+
+    async def _disable_auto_roles(self, interaction: discord.Interaction) -> None:
+        template = self.templates[self.index]
+        try:
+            await strip_template_top_roles(bot, fe, template.id)
+            fe.be.update_game_template(template_id=template.id, auto_top_roles=False)
+            self.templates[self.index] = fe.be.get_game_template(template.id)
+            self._sync_buttons()
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
+            await interaction.followup.send(
+                f"🏆 Auto top roles disabled for **{template.name}**; roles removed from current holders.",
+                ephemeral=True,
+            )
+        except Exception as exc:
+            logger.exception("disable auto roles failed | template_id=%s", template.id, exc_info=exc)
+            await interaction.response.send_message("❌ Failed to disable auto top roles.", ephemeral=True)
+
     async def _set_channel(self, interaction: discord.Interaction) -> None:
         template = self.templates[self.index]
         await interaction.response.send_message(
@@ -2071,6 +2124,7 @@ class RecurringTemplateManager(discord.ui.View):
     async def _confirm_delete(self, interaction: discord.Interaction) -> None:
         template = self.templates[self.index]
         try:
+            await strip_template_top_roles(bot, fe, template.id)
             fe.be.remove_game_template(template_id=template.id)
             del self.templates[self.index]
             await self._advance_after_delete_prompt(interaction, deleted=True)
@@ -2218,6 +2272,7 @@ async def update(
                 enforce_permissions=False,
             )
             await push_all_recurring_leaderboards(bot, fe, name_resolver=resolve_player_name)
+            await sync_recurring_top_roles(bot, fe)
         embed.title = "Success"
         embed.description = f"All games have been successfully updated"
         embed.color = discord.Color.green()

@@ -472,7 +472,7 @@ class Backend:
         
         raise Exception('Failed to repair games', e)
         
-    def update_game(self, game_id:int | str, owner:Optional[int]=None, name:Optional[str]=None, start_date:Optional[str]=None, end_date:Optional[str]=None, status:Optional[str]=None, starting_money:Optional[float]=None, pick_date:Optional[str]=None, private_game:Optional[bool]=None, total_picks:Optional[int]=None, exclusive_picks:Optional[bool]=None, sell_during_game:Optional[bool]=None, update_frequency:Optional[dtv.UpdateFrequency]=None, aggregate_value:Optional[float]=None, change_dollars:Optional[float]=None, change_percent:Optional[float]=None, leaderboard_message_id:Optional[str]=None, clear_leaderboard_message:bool=False, clear_end_date:bool=False, clear_pick_date:bool=False):
+    def update_game(self, game_id:int | str, owner:Optional[int]=None, name:Optional[str]=None, start_date:Optional[str]=None, end_date:Optional[str]=None, status:Optional[str]=None, starting_money:Optional[float]=None, pick_date:Optional[str]=None, private_game:Optional[bool]=None, total_picks:Optional[int]=None, exclusive_picks:Optional[bool]=None, sell_during_game:Optional[bool]=None, update_frequency:Optional[dtv.UpdateFrequency]=None, aggregate_value:Optional[float]=None, change_dollars:Optional[float]=None, change_percent:Optional[float]=None, leaderboard_message_id:Optional[str]=None, clear_leaderboard_message:bool=False, top_roles_applied:Optional[bool]=None, clear_end_date:bool=False, clear_pick_date:bool=False):
         """Update an existing game
         
         Args:
@@ -494,6 +494,7 @@ class Backend:
             change_percent (float, optional): change_dollars in percent format.  Rounded to two decimal points.
             leaderboard_message_id (Optional[str], optional): Comma-separated Discord message ids for recurring leaderboard push pages.
             clear_leaderboard_message (bool, optional): Clear stored leaderboard message id.
+            top_roles_applied (Optional[bool], optional): Mark recurring auto top-role processing complete.
             clear_end_date (bool, optional): Remove the optional end date.
             clear_pick_date (bool, optional): Remove the optional pick deadline.
         """
@@ -543,6 +544,7 @@ class Backend:
                 change_dollars = round(change_dollars, 2) if change_dollars is not None else None,
                 change_percent = round(change_percent, 2) if change_percent is not None else None,
                 leaderboard_message_id = 'NULL' if clear_leaderboard_message else leaderboard_message_id,
+                top_roles_applied = int(top_roles_applied) if top_roles_applied is not None else None,
                 last_updated = _iso8601()
             )
         except ValueError as e: # Raised when Constraint check fails
@@ -662,6 +664,7 @@ class Backend:
         push_leaderboard: Optional[bool] = None,
         leaderboard_channel_id: Optional[str] = None,
         clear_leaderboard_channel: bool = False,
+        auto_top_roles: Optional[bool] = None,
     ):
         """Update the mutable scheduling / push fields on a recurring-game template."""
         if (
@@ -673,6 +676,7 @@ class Backend:
             and push_leaderboard is None
             and leaderboard_channel_id is None
             and not clear_leaderboard_channel
+            and auto_top_roles is None
         ):
             raise ValueError('At least one template field must be changed.')
         if status is not None and status not in get_args(dtv.GameTemplateStatus):
@@ -696,6 +700,7 @@ class Backend:
             game_length=game_length,
             push_leaderboard=int(push_leaderboard) if push_leaderboard is not None else None,
             leaderboard_channel_id=channel_value,
+            auto_top_roles=int(auto_top_roles) if auto_top_roles is not None else None,
             last_updated=_iso8601(),
         )
 
@@ -1237,6 +1242,72 @@ class Backend:
         )
         if resp.status != 'success':
             raise LookupError('Game invite not found.')
+
+    # # TEMPLATE ROLE HOLDERS (recurring auto top-3) # #
+    def get_template_role_holders(self, template_id: int) -> tuple[dtv.TemplateRoleHolder, ...]:
+        resp = self.sql.get(
+            table='template_role_holders',
+            filters={'template_id': int(template_id)},
+            order={'rank': 'ASC'},
+        )
+        try:
+            return self._many_get(typeadapter=dtv.TemplateRoleHolders, resp=resp)
+        except LookupError:
+            return ()
+
+    def clear_template_role_holders(self, template_id: int) -> None:
+        resp = self.sql.delete(
+            table='template_role_holders',
+            filters={'template_id': int(template_id)},
+            force=True,
+        )
+        if resp.status != 'success' and resp.reason not in ('NO ROWS RETURNED', 'NO ROWS EFFECTED'):
+            raise Exception(f'Failed to clear role holders for template {template_id}.', resp)
+
+    def replace_template_role_holders(
+        self,
+        template_id: int,
+        *,
+        game_id: str,
+        ranked_user_ids: list[int],
+    ) -> None:
+        """Replace all holder rows for a template with up to three ranked users."""
+        self.clear_template_role_holders(template_id)
+        now = _iso8601()
+        for rank, user_id in enumerate(ranked_user_ids[:3], start=1):
+            resp = self.sql.insert(
+                table='template_role_holders',
+                items={
+                    'template_id': int(template_id),
+                    'rank': rank,
+                    'user_id': int(user_id),
+                    'game_id': str(game_id),
+                    'datetime_awarded': now,
+                },
+            )
+            if resp.status != 'success':
+                raise Exception(
+                    f'Failed to store role holder template={template_id} rank={rank}.',
+                    resp,
+                )
+
+    def get_games_pending_top_roles(self) -> tuple[dtv.Game, ...]:
+        """Ended recurring games not yet processed for auto top roles."""
+        try:
+            games = self.get_many_games(
+                include_public=True,
+                include_private=True,
+                include_open=False,
+                include_active=False,
+                include_ended=True,
+            )
+        except LookupError:
+            return ()
+        return tuple(
+            game
+            for game in games
+            if game.template_id is not None and not game.top_roles_applied
+        )
 
         
   

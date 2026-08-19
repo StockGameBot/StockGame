@@ -14,10 +14,20 @@ def test_create_fresh_database_has_current_version(db_path):
     conn = sqlite3.connect(db_path)
     try:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(game_templates)")}
+        assert "push_leaderboard" in cols
+        assert "leaderboard_channel_id" in cols
+        assert "auto_top_roles" in cols
+        game_cols = {row[1] for row in conn.execute("PRAGMA table_info(games)")}
+        assert "top_roles_applied" in game_cols
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert "template_role_holders" in tables
     finally:
         conn.close()
-    assert "push_leaderboard" in cols
-    assert "leaderboard_channel_id" in cols
 
 
 def test_remake_on_version_mismatch_backs_up_and_wipes(db_path):
