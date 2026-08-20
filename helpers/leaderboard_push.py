@@ -247,122 +247,14 @@ def render_final_standings(game, top3: list[dict]) -> discord.Embed:
     return embed
 
 
-async def _resolve_push_channel(
-    bot: discord.Client,
-    channel_id: int,
-) -> tuple[Optional[discord.TextChannel], Optional[discord.Member]]:
-    channel = bot.get_channel(channel_id)
-    if channel is None:
-        try:
-            channel = await bot.fetch_channel(channel_id)
-        except Exception as exc:
-            logger.warning("Cannot fetch push channel %s: %s", channel_id, exc)
-            return None, None
-    if not isinstance(channel, discord.TextChannel):
-        logger.warning("Push channel %s is not a text channel", channel_id)
-        return None, None
-    guild = channel.guild
-    me = guild.me if guild else None
-    if me is None or not bot_can_push_to_channel(channel, me):
-        return None, None
-    return channel, me
-
-
-async def _upsert_final_embed_message(
-    *,
-    channel: discord.TextChannel,
-    message_id: Optional[str],
-    embed: discord.Embed,
-    game_id: Any,
-) -> Optional[str]:
-    """Edit or send a single embed-only final standings message."""
-    edit_kwargs: dict[str, Any] = {"embed": embed, "attachments": []}
-
-    if message_id:
-        try:
-            msg = await channel.fetch_message(int(message_id))
-            await msg.edit(**edit_kwargs)
-            return str(msg.id)
-        except Exception as exc:
-            if not is_unknown_message_error(exc):
-                logger.warning(
-                    "Final standings edit failed (will retry next cycle) game=%s msg=%s: %s",
-                    game_id,
-                    message_id,
-                    exc,
-                )
-                return message_id
-            await _delete_message_quiet(channel, message_id)
-
-    try:
-        sent = await channel.send(embed=embed)
-    except Exception as exc:
-        logger.warning("Final standings send failed for game %s: %s", game_id, exc)
-        return None
-    return str(sent.id)
-
-
-async def push_or_edit_final_embed(
-    *,
-    channel: discord.TextChannel,
-    game,
-    fe,
-    embed: discord.Embed,
-) -> Optional[str]:
-    """Sync one embed-only final standings message; drop extra recurring pages."""
-    existing = parse_leaderboard_message_ids(getattr(game, "leaderboard_message_id", None))
-    page_id = await _upsert_final_embed_message(
-        channel=channel,
-        message_id=existing[0] if existing else None,
-        embed=embed,
-        game_id=game.id,
-    )
-    if page_id is None:
-        return None
-
-    for stale_id in existing[1:]:
-        await _delete_message_quiet(channel, stale_id)
-
-    try:
-        fe.be.update_game(game_id=game.id, leaderboard_message_id=page_id)
-    except Exception:
-        logger.exception("Failed to persist leaderboard_message_id for game %s", game.id)
-    return page_id
-
-
-async def push_final_standings_for_game(
-    *,
-    bot: discord.Client,
-    fe,
-    game,
-    channel: discord.TextChannel,
-    guild: discord.Guild,
-    name_resolver: Optional[Callable[[int, Optional[discord.Guild]], Awaitable[str]]] = None,
-) -> None:
-    """Send or edit the one-time final standings message for an ended game."""
-    players, _owned = await asyncio.to_thread(collect_push_players, fe, game)
-    if name_resolver is not None:
-        for player in players:
-            try:
-                player["display_name"] = await name_resolver(int(player["user_id"]), guild)
-            except Exception:
-                logger.debug("Name lookup failed for user %s", player["user_id"])
-    top3 = _top_three_players(players)
-    # avatars = await fetch_player_avatars(bot, guild, user_ids)
-    embed = await asyncio.to_thread(render_final_standings, game, top3)
-    game = await asyncio.to_thread(fe.be.get_game, game.id)
-    await push_or_edit_final_embed(
-        channel=channel,
-        game=game,
-        fe=fe,
-        embed=embed,
-    )
+async def mark_final_leaderboard_pushed(fe, game) -> None:
+    """Mark an ended recurring game so its last pushed standings are left in place."""
     await asyncio.to_thread(
         fe.be.update_game,
         game_id=game.id,
         leaderboard_final_pushed=True,
     )
-    logger.info("Final standings pushed for game %s", game.id)
+    logger.info("Final leaderboard frozen for game %s (messages unchanged)", game.id)
 
 
 def parse_leaderboard_message_ids(raw: Optional[str]) -> list[str]:
@@ -768,37 +660,9 @@ async def push_all_recurring_leaderboards(
         if str(game.id) in seen_push_ids:
             continue
         try:
-            template = await asyncio.to_thread(fe.be.get_game_template, game.template_id)
-        except LookupError:
-            continue
-        if not template.push_leaderboard or not template.leaderboard_channel_id:
-            await asyncio.to_thread(
-                fe.be.update_game,
-                game_id=game.id,
-                leaderboard_final_pushed=True,
-            )
-            continue
-        channel_id = int(template.leaderboard_channel_id)
-        channel, me = await _resolve_push_channel(bot, channel_id)
-        if channel is None or me is None:
-            if me is None and channel is not None:
-                logger.warning(
-                    "Missing push permissions in channel %s for final game %s; skipping",
-                    channel_id,
-                    game.id,
-                )
-            continue
-        try:
-            await push_final_standings_for_game(
-                bot=bot,
-                fe=fe,
-                game=game,
-                channel=channel,
-                guild=channel.guild,
-                name_resolver=name_resolver,
-            )
+            await mark_final_leaderboard_pushed(fe, game)
             seen_push_ids.add(str(game.id))
         except Exception:
-            logger.exception("Final standings push failed for game %s", game.id)
+            logger.exception("Final leaderboard freeze failed for game %s", game.id)
 
     prune_push_image_cache(seen_push_ids)

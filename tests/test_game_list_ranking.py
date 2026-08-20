@@ -46,7 +46,7 @@ def test_list_games_ranked_recurring_first_then_prominence_then_players(fe, mock
 
     ranked = fe.list_games_ranked(today=date(2026, 8, 1))
     names = [g.name for g, _ in ranked]
-    assert names[0] == "Aug 2026"
+    assert names[0] == "RecurringTop Aug 2026"
     # Near (prominent) before far (not prominent), even with fewer players
     assert names.index("NearQuiet") < names.index("FarCrowd")
 
