@@ -65,7 +65,7 @@ def test_recurring_games_create_due_template_once(be, mocker):
     assert len(games) == 1
     assert games[0].template_id is not None
     assert games[0].start_date == date(2025, 3, 1)
-    assert games[0].name == "BiMonthly"
+    assert games[0].name == "Mar 2025"
 
 
 def test_recurring_games_first_start_is_template_start_date(be, mocker):
@@ -89,7 +89,7 @@ def test_recurring_games_first_start_is_template_start_date(be, mocker):
     games = be.get_many_games(owner_id=owner_id, include_private=True)
     assert len(games) == 1
     assert games[0].start_date == date(2026, 7, 31)
-    assert games[0].name == "monthly1"
+    assert games[0].name == "Jul 2026"
 
 
 def test_add_game_template_rejects_duplicate_name(be):
@@ -134,19 +134,19 @@ def test_add_game_template_rejects_length_gt_period(be):
         )
 
 
-def test_recurring_games_uniquifies_name_without_dates(be, mocker):
+def test_recurring_games_uniquifies_month_year_name(be, mocker):
     from stocks import GameLogic
 
     owner_id = 505
     be.add_user(owner_id, "testing")
     be.add_game(
         user_id=owner_id,
-        name="clash",
+        name="Jul 2026",
         start_date="2026-07-01",
     )
     be.add_game_template(
         user_id=owner_id,
-        name="clash",
+        name="Monthly Series",
         start_date="2026-07-31",
         create_days_in_advance=1,
         recurring_period=1,
@@ -158,10 +158,10 @@ def test_recurring_games_uniquifies_name_without_dates(be, mocker):
     logic.recurring_games()
     games = be.get_many_games(owner_id=owner_id, include_private=True)
     names = sorted(game.name for game in games)
-    assert names == ["clash", "clash #2"]
+    assert names == ["Jul 2026", "Jul 2026 #2"]
     spawned = [game for game in games if game.template_id is not None]
     assert len(spawned) == 1
-    assert spawned[0].name == "clash #2"
+    assert spawned[0].name == "Jul 2026 #2"
 
 
 def test_recurring_games_skips_disabled_templates(be, mocker):
@@ -235,4 +235,4 @@ def test_recurring_games_catches_up_multiple_due(be, mocker):
     starts = sorted(game.start_date for game in games)
     assert starts == [date(2026, 1, 31), date(2026, 2, 28), date(2026, 3, 31)]
     names = sorted(game.name for game in games)
-    assert names == ["catchup", "catchup #2", "catchup #3"]
+    assert names == ["Feb 2026", "Jan 2026", "Mar 2026"]

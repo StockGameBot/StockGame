@@ -59,6 +59,7 @@ class Game(BaseModel):
     change_percent: Optional[float] = None
     leaderboard_message_id: Optional[str] = None
     top_roles_applied: bool = False
+    leaderboard_final_pushed: bool = False
     datetime_created: datetime # YYYY-MM-DD HH:MM:SS
     last_updated: Optional[datetime] = Field(default=None, validation_alias=AliasChoices('datetime_updated', 'last_updated')) # YYYY-MM-DD HH:MM:SS
 

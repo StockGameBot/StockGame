@@ -1,7 +1,9 @@
 import asyncio
+from datetime import date
 from types import SimpleNamespace
 
 import helpers.autocomplete as autocomplete
+from stocks import Frontend
 
 
 def test_sell_ticker_autocomplete_accepts_string_game_ids():
@@ -189,6 +191,19 @@ def test_leaderboard_autocomplete_groups_accessible_games():
     ]
 
 
+def _fake_frontend_for_participant(*games_with_counts):
+    today = date(2026, 8, 19)
+
+    def list_my_games_ranked(user_id, include_ended=False):
+        return list(games_with_counts)
+
+    return SimpleNamespace(
+        list_my_games_ranked=list_my_games_ranked,
+        game_status_emoji=Frontend.game_status_emoji,
+        gl=SimpleNamespace(_today_et=lambda: today),
+    )
+
+
 def test_participant_autocomplete_marks_recurring_and_owner():
     game = SimpleNamespace(
         id="G1",
@@ -197,19 +212,17 @@ def test_participant_autocomplete_marks_recurring_and_owner():
         template_id=7,
         private_game=False,
         status="active",
+        start_date=date(2026, 8, 1),
+        pick_date=None,
+        end_date=date(2026, 8, 31),
     )
-    fake_frontend = SimpleNamespace(
-        my_games=lambda user_id, include_ended=False: SimpleNamespace(
-            games=[game],
-        ),
-    )
-    autocomplete.init_autocomplete(fake_frontend)
+    autocomplete.init_autocomplete(_fake_frontend_for_participant((game, 3)))
     interaction = SimpleNamespace(user=SimpleNamespace(id=42))
 
     choices = asyncio.run(autocomplete.all_games_autocomplete(interaction, ""))
 
     assert [(choice.name, choice.value) for choice in choices] == [
-        ("🔁 My Game (ID: G1) [OWNER]", "G1"),
+        ("💸 🔁 My Game (ID: G1) [OWNER]", "G1"),
     ]
 
 
@@ -221,16 +234,51 @@ def test_private_owner_autocomplete_uses_shared_label():
         template_id=None,
         private_game=True,
         status="active",
+        start_date=date(2026, 8, 1),
+        pick_date=None,
+        end_date=date(2026, 8, 31),
     )
-    fake_frontend = SimpleNamespace(
-        my_games=lambda user_id, include_ended=False: SimpleNamespace(games=[game]),
-    )
-    autocomplete.init_autocomplete(fake_frontend)
+    autocomplete.init_autocomplete(_fake_frontend_for_participant((game, 1)))
     interaction = SimpleNamespace(user=SimpleNamespace(id=42))
 
     choices = asyncio.run(autocomplete.private_owner_games_autocomplete(interaction, ""))
 
-    assert choices[0].name == "🔒 Secret (ID: P1) [OWNER]"
+    assert choices[0].name == "💸 🔒 Secret (ID: P1) [OWNER]"
+
+
+def test_participant_autocomplete_uses_game_list_rank_order():
+    prominent = SimpleNamespace(
+        id="RUN1",
+        name="Running",
+        owner_id=42,
+        template_id=5,
+        private_game=False,
+        status="active",
+        start_date=date(2026, 8, 1),
+        pick_date=date(2026, 7, 1),
+        end_date=date(2026, 8, 31),
+    )
+    quiet = SimpleNamespace(
+        id="OLD1",
+        name="Old Locked",
+        owner_id=42,
+        template_id=None,
+        private_game=False,
+        status="active",
+        start_date=date(2025, 1, 1),
+        pick_date=date(2024, 12, 1),
+        end_date=date(2025, 12, 31),
+    )
+    autocomplete.init_autocomplete(
+        _fake_frontend_for_participant((prominent, 8), (quiet, 2))
+    )
+    interaction = SimpleNamespace(user=SimpleNamespace(id=42))
+
+    choices = asyncio.run(autocomplete.all_games_autocomplete(interaction, ""))
+
+    assert [choice.value for choice in choices] == ["RUN1", "OLD1"]
+    assert choices[0].name.startswith("🏃")
+    assert choices[1].name.startswith("🛑")
 
 
 def test_leaderboard_autocomplete_searches_name_and_id():
