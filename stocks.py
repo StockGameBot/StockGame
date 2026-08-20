@@ -1476,7 +1476,7 @@ class GameLogic: # Might move some of the control/running actions here
                         break
 
                     game_name = self._unique_recurring_game_name(
-                        next_start_date.strftime('%b %Y')
+                        f"{template.name} {next_start_date.strftime('%b %Y')}"
                     )
                     pick_date = None
                     if template.pick_date is not None:

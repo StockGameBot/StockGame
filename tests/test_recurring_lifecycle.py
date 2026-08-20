@@ -494,7 +494,7 @@ def test_unique_name_collision_chain(be, mocker):
     logic.recurring_games()
     spawned = _spawned(be, owner_id)
     assert len(spawned) == 1
-    assert spawned[0].name == "Jan 2026"
+    assert spawned[0].name == "series Jan 2026"
 
 
 # ---------------------------------------------------------------------------
@@ -629,8 +629,7 @@ def test_disabled_sibling_does_not_block_enabled_template(be, mocker):
     logic.recurring_games()
     spawned = _spawned(be, owner_id)
     assert len(spawned) == 1
-    assert spawned[0].name == "Jan 2026"
-    assert spawned[0].template_id != stopped.id
+    assert spawned[0].name == "sibling-live Jan 2026"
 
 
 def test_manage_listing_includes_enabled_and_disabled(be):
