@@ -191,5 +191,6 @@ data/backups/
 settings.json
 testPIL.py
 temp_leaderboard_previews.py
+output/
 
 AGENTS.md

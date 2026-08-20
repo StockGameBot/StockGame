@@ -13,8 +13,10 @@ from helpers.leaderboard_push import (
     parse_leaderboard_message_ids,
     push_or_edit_leaderboard_message,
     push_or_edit_leaderboard_messages,
+    render_final_standings,
     serialize_leaderboard_message_ids,
 )
+# from helpers.final_standings_podium import FinalStandingsPodiumGenerator
 from helpers.recurring_leaderboard_image import (
     LEADERBOARD_N_CANDIDATES,
     TITLE_BLOCK,
@@ -223,11 +225,71 @@ def test_push_embed_carries_game_title_and_not_image_attachment():
     game.change_percent = 1
     game.start_date = date.today()
     game.end_date = None
+    game.status = "active"
 
     embed = build_push_embed(game)
 
     assert embed.title == "📈 Example (ID: ABCDE)"
     assert embed.image.url is None
+
+
+def test_final_push_embed_uses_stop_and_past_tense():
+    game = MagicMock()
+    game.name = "Aug 2026"
+    game.id = "AUG26"
+    game.change_dollars = -250
+    game.change_percent = -2.5
+    game.start_date = date(2026, 8, 1)
+    game.end_date = date(2026, 8, 31)
+    game.status = "ended"
+
+    embed = build_push_embed(game, final=True)
+
+    assert embed.title.startswith("🛑")
+    assert "**was** down" in embed.description
+    assert "Game complete" in embed.description
+    assert embed.footer.text.startswith("Final standings")
+
+
+def test_render_final_standings_smoke():
+    game = MagicMock()
+    game.name = "Aug 2026"
+    game.start_date = date(2026, 8, 1)
+    game.end_date = date(2026, 8, 31)
+    game.status = "ended"
+    top3 = [
+        {
+            "rank": 1,
+            "user_id": 1,
+            "display_name": "Winner",
+            "current_value": 12000,
+            "change_percent": 20.0,
+            "picks": [
+                {"ticker": "NVDA", "change_percent": 15.0, "status": "owned"},
+                {"ticker": "INTC", "change_percent": -3.0, "status": "owned"},
+            ],
+        },
+        {
+            "rank": 2,
+            "user_id": 2,
+            "display_name": "Second",
+            "current_value": 11000,
+            "change_percent": 10.0,
+            "picks": [{"ticker": "AAPL", "change_percent": 10.0, "status": "owned"}],
+        },
+        {
+            "rank": 3,
+            "user_id": 3,
+            "display_name": "Third",
+            "current_value": 9000,
+            "change_percent": -5.0,
+            "picks": [{"ticker": "TSLA", "change_percent": -5.0, "status": "owned"}],
+        },
+    ]
+    embed = render_final_standings(game, top3)
+    assert embed.title.startswith("🛑")
+    assert embed.fields[0].name == "Best owned pick"
+    assert "NVDA" in embed.fields[0].value
 
 
 def test_push_edits_standalone_attachment_in_place():

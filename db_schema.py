@@ -26,7 +26,7 @@ logger = logging.getLogger("DbSchema")
 # # (YYYY-MM-DD HH:MM:SS) objects should include 'datetime' in the key name
 # # (YYYY-MM-DD) objects should include 'date' in the key name
 
-db_ver = "0.2.3"  # Current schema version
+db_ver = "0.2.4"  # Current schema version
 
 # (from_version, to_version) -> migration function that mutates ``db_name`` in place.
 # When no entry matches a version jump, :func:`ensure_database` remakes empty.
@@ -89,9 +89,28 @@ def _migrate_0_2_2_to_0_2_3(db_name: str) -> None:
         conn.close()
 
 
+def _migrate_0_2_3_to_0_2_4(db_name: str) -> None:
+    """Add final leaderboard push idempotency flag."""
+    conn = sqlite3.connect(db_name)
+    try:
+        game_cols = {row[1] for row in conn.execute("PRAGMA table_info(games)")}
+        if "leaderboard_final_pushed" not in game_cols:
+            conn.execute(
+                "ALTER TABLE games ADD COLUMN leaderboard_final_pushed INTEGER NOT NULL DEFAULT 0"
+            )
+        conn.execute(
+            """UPDATE games SET leaderboard_final_pushed = 1
+               WHERE status = 'ended' AND leaderboard_message_id IS NOT NULL"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 MIGRATIONS: dict[tuple[str, str], MigrationFn] = {
     ("0.2.1", "0.2.2"): _migrate_0_2_1_to_0_2_2,
     ("0.2.2", "0.2.3"): _migrate_0_2_2_to_0_2_3,
+    ("0.2.3", "0.2.4"): _migrate_0_2_3_to_0_2_4,
 }
 
 
@@ -236,7 +255,7 @@ def ensure_database(db_name: str, *, target_version: str = db_ver) -> str:
 def create(db_name:str, upgrade:bool=True):
     """Create database schema tables.
 
-    Version: 0.2.3
+    Version: 0.2.4
 
     Args:
         db_name (str): Database name
@@ -244,6 +263,10 @@ def create(db_name:str, upgrade:bool=True):
             ``db_ver``, run :func:`ensure_database` (migrate or remake). Defaults to True.
 
     # Changelog
+
+    ## [0.2.4] - 2026-08-19
+    ### Added
+    - ``leaderboard_final_pushed`` on games for one-time final standings push
 
     ## [0.2.3] - 2026-08-19
     ### Added
@@ -375,6 +398,7 @@ def create(db_name:str, upgrade:bool=True):
         change_percent REAL DEFAULT NULL,
         leaderboard_message_id TEXT DEFAULT NULL,             -- Comma-separated Discord message snowflakes for push page edits
         top_roles_applied INTEGER NOT NULL DEFAULT 0,         -- Recurring auto top-role processing done
+        leaderboard_final_pushed INTEGER NOT NULL DEFAULT 0,  -- Final standings push sent
         datetime_created TEXT NOT NULL,                       -- ISO8601 (YYYY-MM-DD HH:MM:SS)
         last_updated TEXT DEFAULT NULL,                       -- ISO8601 (YYYY-MM-DD HH:MM:SS)
         

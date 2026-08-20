@@ -19,6 +19,7 @@ def test_create_fresh_database_has_current_version(db_path):
         assert "auto_top_roles" in cols
         game_cols = {row[1] for row in conn.execute("PRAGMA table_info(games)")}
         assert "top_roles_applied" in game_cols
+        assert "leaderboard_final_pushed" in game_cols
         tables = {
             row[0]
             for row in conn.execute(

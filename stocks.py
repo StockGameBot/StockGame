@@ -472,7 +472,7 @@ class Backend:
         
         raise Exception('Failed to repair games', e)
         
-    def update_game(self, game_id:int | str, owner:Optional[int]=None, name:Optional[str]=None, start_date:Optional[str]=None, end_date:Optional[str]=None, status:Optional[str]=None, starting_money:Optional[float]=None, pick_date:Optional[str]=None, private_game:Optional[bool]=None, total_picks:Optional[int]=None, exclusive_picks:Optional[bool]=None, sell_during_game:Optional[bool]=None, update_frequency:Optional[dtv.UpdateFrequency]=None, aggregate_value:Optional[float]=None, change_dollars:Optional[float]=None, change_percent:Optional[float]=None, leaderboard_message_id:Optional[str]=None, clear_leaderboard_message:bool=False, top_roles_applied:Optional[bool]=None, clear_end_date:bool=False, clear_pick_date:bool=False):
+    def update_game(self, game_id:int | str, owner:Optional[int]=None, name:Optional[str]=None, start_date:Optional[str]=None, end_date:Optional[str]=None, status:Optional[str]=None, starting_money:Optional[float]=None, pick_date:Optional[str]=None, private_game:Optional[bool]=None, total_picks:Optional[int]=None, exclusive_picks:Optional[bool]=None, sell_during_game:Optional[bool]=None, update_frequency:Optional[dtv.UpdateFrequency]=None, aggregate_value:Optional[float]=None, change_dollars:Optional[float]=None, change_percent:Optional[float]=None, leaderboard_message_id:Optional[str]=None, clear_leaderboard_message:bool=False, top_roles_applied:Optional[bool]=None, leaderboard_final_pushed:Optional[bool]=None, clear_end_date:bool=False, clear_pick_date:bool=False):
         """Update an existing game
         
         Args:
@@ -495,6 +495,7 @@ class Backend:
             leaderboard_message_id (Optional[str], optional): Comma-separated Discord message ids for recurring leaderboard push pages.
             clear_leaderboard_message (bool, optional): Clear stored leaderboard message id.
             top_roles_applied (Optional[bool], optional): Mark recurring auto top-role processing complete.
+            leaderboard_final_pushed (Optional[bool], optional): Mark final standings push complete.
             clear_end_date (bool, optional): Remove the optional end date.
             clear_pick_date (bool, optional): Remove the optional pick deadline.
         """
@@ -545,6 +546,7 @@ class Backend:
                 change_percent = round(change_percent, 2) if change_percent is not None else None,
                 leaderboard_message_id = 'NULL' if clear_leaderboard_message else leaderboard_message_id,
                 top_roles_applied = int(top_roles_applied) if top_roles_applied is not None else None,
+                leaderboard_final_pushed = int(leaderboard_final_pushed) if leaderboard_final_pushed is not None else None,
                 last_updated = _iso8601()
             )
         except ValueError as e: # Raised when Constraint check fails
@@ -1309,6 +1311,25 @@ class Backend:
             if game.template_id is not None and not game.top_roles_applied
         )
 
+    def get_games_pending_final_push(self) -> tuple[dtv.Game, ...]:
+        """Ended recurring games not yet sent a final standings push."""
+        try:
+            games = self.get_many_games(
+                include_public=True,
+                include_private=True,
+                include_open=False,
+                include_active=False,
+                include_ended=True,
+            )
+        except LookupError:
+            return ()
+        return tuple(
+            game
+            for game in games
+            if game.template_id is not None and not game.leaderboard_final_pushed
+        )
+
+
         
   
 class GameLogic: # Might move some of the control/running actions here
@@ -1397,10 +1418,7 @@ class GameLogic: # Might move some of the control/running actions here
         return next_start
 
     def _unique_recurring_game_name(self, base_name: str) -> str:
-        """Return ``base_name``, or ``base_name #n`` if that name is taken.
-
-        Does not embed calendar dates (naming scheme TBD later).
-        """
+        """Return ``base_name``, or ``base_name #n`` if that name is taken."""
         candidate = base_name[:35]
         attempt = 1
         while attempt <= 100:
@@ -1457,7 +1475,9 @@ class GameLogic: # Might move some of the control/running actions here
                     if due_date > today:
                         break
 
-                    game_name = self._unique_recurring_game_name(template.name)
+                    game_name = self._unique_recurring_game_name(
+                        next_start_date.strftime('%b %Y')
+                    )
                     pick_date = None
                     if template.pick_date is not None:
                         pick_date = next_start_date - timedelta(days=template.pick_date)

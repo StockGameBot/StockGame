@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
+from datetime import date
 from typing import Callable
 
 import discord
@@ -41,9 +42,15 @@ def _normalize_typed_ticker(current: str) -> str | None:
     return ticker
 
 
-def format_game_autocomplete_label(game: Game, *, is_owner: bool = False) -> str:
-    """Uniform game label: optional 🔁/🔒 prefixes, name, id, optional [OWNER]."""
-    prefix = f"{'🔁 ' if getattr(game, 'template_id', None) is not None else ''}"
+def format_game_autocomplete_label(
+    game: Game,
+    *,
+    is_owner: bool = False,
+    status_emoji: str | None = None,
+) -> str:
+    """Uniform game label: status emoji, optional 🔁/🔒 prefixes, name, id."""
+    emoji_prefix = f"{status_emoji} " if status_emoji else ""
+    prefix = emoji_prefix + (f"{'🔁 ' if getattr(game, 'template_id', None) is not None else ''}")
     prefix += f"{'🔒 ' if getattr(game, 'private_game', False) else ''}"
     suffix = " [OWNER]" if is_owner else ""
     return f"{prefix}{game.name} (ID: {game.id}){suffix}"[:100]
@@ -61,13 +68,25 @@ def _choices_from_games(
     needle: str,
 ) -> list[Choice[str]]:
     """Build up to 25 choices from ``(game, is_owner)`` pairs."""
+    today = date.today()
+    if _fe is not None and hasattr(_fe, "gl"):
+        today = _fe.gl._today_et()
     choices: list[Choice[str]] = []
     for game, is_owner in games:
         if not _matches_game_needle(game, needle):
             continue
+        status_emoji = (
+            _fe.game_status_emoji(game, today)
+            if _fe is not None and hasattr(_fe, "game_status_emoji")
+            else None
+        )
         choices.append(
             Choice(
-                name=format_game_autocomplete_label(game, is_owner=is_owner),
+                name=format_game_autocomplete_label(
+                    game,
+                    is_owner=is_owner,
+                    status_emoji=status_emoji,
+                ),
                 value=str(game.id),
             )
         )
@@ -93,12 +112,15 @@ def _collect_participant_games(
     if _fe is None:
         return []
     try:
-        user_games = _fe.my_games(interaction.user.id, include_ended=include_ended)
+        ranked = _fe.list_my_games_ranked(
+            interaction.user.id,
+            include_ended=include_ended,
+        )
     except LookupError:
         return []
 
     rows: list[tuple[Game, bool]] = []
-    for game in user_games.games:
+    for game, _count in ranked:
         is_owner = game.owner_id == interaction.user.id
         if owner_only and not is_owner:
             continue
