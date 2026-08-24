@@ -3,7 +3,7 @@ import sqlite3
 
 from helpers.db_backup import create_db_backup, prune_backups, maybe_daily_backup
 from helpers.sqlhelper import SqlHelper
-from db_schema import create, db_ver, remake_db_on_mismatch, ensure_database, MIGRATIONS
+from db_schema import create, db_ver, remake_db_on_mismatch, ensure_database, MIGRATIONS, repair_zero_stock_pick_start_values
 
 
 def test_create_fresh_database_has_current_version(db_path):
@@ -155,3 +155,75 @@ def test_ensure_database_runs_registered_migration(db_path):
         assert info.result[0]["current_version"] == db_ver
     finally:
         MIGRATIONS.pop(("0.0.9", db_ver), None)
+
+
+def test_repair_zero_stock_pick_start_values(be):
+    owner_id = 501
+    be.add_user(owner_id, "testing")
+    game_id = be.add_game(
+        user_id=owner_id,
+        name="BadStartValues",
+        start_date="2025-01-01",
+        starting_money=1.0,
+        total_picks=500,
+    )
+    be.update_game(game_id, status="active")
+    be.add_participant(owner_id, game_id)
+    participant = be.get_many_participants(game_id=game_id)[0]
+    be.add_stock("FIXME", "NASDAQ", "Fix Me Co")
+    stock = be.get_stock("FIXME")
+    be.add_stock_pick(participant.id, stock.id)
+    pick = be.get_many_stock_picks(participant_id=participant.id)[0]
+    be.update_stock_pick(
+        pick.id,
+        status="owned",
+        shares=0.0002,
+        start_value=0.0,
+        current_value=0.01,
+        change_dollars=0.01,
+        change_percent=0.0,
+    )
+
+    assert repair_zero_stock_pick_start_values(be.sql.db) == 1
+
+    updated = be.get_stock_pick(pick.id)
+    assert updated.start_value == 0.002
+    assert updated.change_dollars == 0.008
+    assert updated.change_percent == 400.0
+
+
+def test_ensure_database_migrates_0_2_4_to_0_2_5_and_repairs_picks(be):
+    owner_id = 502
+    be.add_user(owner_id, "testing")
+    game_id = be.add_game(
+        user_id=owner_id,
+        name="MigrateRepair",
+        start_date="2025-01-01",
+        starting_money=1.0,
+        total_picks=500,
+    )
+    be.update_game(game_id, status="active")
+    be.add_participant(owner_id, game_id)
+    participant = be.get_many_participants(game_id=game_id)[0]
+    be.add_stock("MIGFX", "NASDAQ", "Migrate Fix Co")
+    stock = be.get_stock("MIGFX")
+    be.add_stock_pick(participant.id, stock.id)
+    pick = be.get_many_stock_picks(participant_id=participant.id)[0]
+    be.update_stock_pick(
+        pick.id,
+        status="owned",
+        shares=0.0002,
+        start_value=0.0,
+        current_value=0.002,
+    )
+    be.sql.update(
+        "database_info",
+        {"current_version": "0.2.4"},
+        filters={"database_name": be.sql.db},
+    )
+
+    assert ensure_database(be.sql.db) == "migrated"
+    info = be.sql.get("database_info", filters={"database_name": be.sql.db})
+    assert info.result[0]["current_version"] == "0.2.5"
+    updated = be.get_stock_pick(pick.id)
+    assert updated.start_value == 0.002

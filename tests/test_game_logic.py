@@ -167,6 +167,71 @@ def test_update_stock_picks_revalues_owned_shares(be, mocker):
     assert updated.change_percent == pytest.approx(20.0)
 
 
+def test_update_stock_picks_low_start_money_keeps_nonzero_start_value(be, mocker):
+    """$1 games with many picks must not store a zero start_value after settlement."""
+    owner_id = 203
+    be.add_user(owner_id, "testing")
+    game_id = be.add_game(
+        user_id=owner_id,
+        name="PennySlots",
+        start_date="2025-01-01",
+        starting_money=1.0,
+        total_picks=500,
+    )
+    be.update_game(game_id, status="active")
+    be.add_participant(owner_id, game_id)
+    participant = be.get_many_participants(game_id=game_id)[0]
+    be.add_stock("PENN", "NASDAQ", "Penny")
+    stock = be.get_stock("PENN")
+    be.add_stock_pick(participant.id, stock.id)
+    be.add_stock_price(stock.id, price=10.0, datetime="2025-05-21 10:00:00")
+
+    logic = GameLogic(be.sql.db)
+    mocker.patch.object(logic, "_is_market_hours", return_value=False)
+    logic.update_stock_picks(game_id=game_id, force=True)
+
+    pick = be.get_many_stock_picks(participant_id=participant.id)[0]
+    assert pick.status == "owned"
+    assert pick.start_value == pytest.approx(0.002)
+    assert pick.start_value > 0
+
+
+def test_update_stock_picks_zero_start_value_does_not_raise(be, mocker):
+    """Legacy picks with start_value=0 should revalue without crashing scheduled updates."""
+    owner_id = 204
+    be.add_user(owner_id, "testing")
+    game_id = be.add_game(
+        user_id=owner_id,
+        name="LegacyZero",
+        start_date="2025-01-01",
+        starting_money=10_000,
+        total_picks=1,
+    )
+    be.update_game(game_id, status="active")
+    be.add_participant(owner_id, game_id)
+    participant = be.get_many_participants(game_id=game_id)[0]
+    be.add_stock("ZERO", "NASDAQ", "Zero Start")
+    stock = be.get_stock("ZERO")
+    be.add_stock_pick(participant.id, stock.id)
+    pick = be.get_many_stock_picks(participant_id=participant.id)[0]
+    be.update_stock_pick(
+        pick.id,
+        status="owned",
+        shares=10.0,
+        start_value=0.0,
+        current_value=0.0,
+    )
+    be.add_stock_price(stock.id, price=50.0, datetime="2025-05-21 10:00:00")
+
+    logic = GameLogic(be.sql.db)
+    logic.update_stock_picks(game_id=game_id, force=True)
+
+    updated = be.get_stock_pick(pick.id)
+    assert updated.current_value == pytest.approx(500.0)
+    assert updated.change_dollars == pytest.approx(500.0)
+    assert updated.change_percent == pytest.approx(0.0)
+
+
 def test_find_stock_returns_existing_and_adds_from_market_data(be, mocker):
     be.add_stock("EXIST", "NASDAQ", "Exists")
     logic = GameLogic(be.sql.db)

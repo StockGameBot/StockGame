@@ -1689,8 +1689,25 @@ class GameLogic: # Might move some of the control/running actions here
                 
                 if pick.status == 'pending_buy':
                     buying_power = float(game.start_money / game.pick_count) # Amount available to buy this stock (starting money divided by picks)
+                    if buying_power <= 0:
+                        self.logger.warning(
+                            'Skipping pending buy pick %s in game %s: non-positive per-pick allocation',
+                            pick.id,
+                            game.id,
+                        )
+                        continue
                     shares = buying_power / price.price# Total shares owned
-                    start_value = current_value = round(float(shares * price.price), 2)
+                    start_value = current_value = round(float(buying_power), 2)
+                    if start_value <= 0:
+                        start_value = current_value = round(float(buying_power), 4)
+                    if start_value <= 0:
+                        self.logger.warning(
+                            'Skipping pending buy pick %s in game %s: per-pick allocation %s rounds to zero',
+                            pick.id,
+                            game.id,
+                            buying_power,
+                        )
+                        continue
                     dollar_change = 0
                     percent_change = 0
                     status = 'owned'
@@ -1700,7 +1717,15 @@ class GameLogic: # Might move some of the control/running actions here
                     assert isinstance(pick.start_value, float) # Owned stocks would have to have this
                     current_value = float(pick.shares * price.price)
                     dollar_change = current_value - pick.start_value
-                    percent_change = (dollar_change / pick.start_value) * 100
+                    if pick.start_value:
+                        percent_change = (dollar_change / pick.start_value) * 100
+                    else:
+                        self.logger.warning(
+                            'Pick %s in game %s has zero start_value; reporting 0%% change',
+                            pick.id,
+                            game.id,
+                        )
+                        percent_change = 0.0
                     if pick.status == 'pending_sell':
                         status = 'sold'
                 self.be.update_stock_pick(pick_id=pick.id,shares=shares, start_value=start_value, current_value=current_value, status=status, change_dollars=dollar_change, change_percent=percent_change) # Update

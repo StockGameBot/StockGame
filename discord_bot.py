@@ -572,6 +572,72 @@ def _game_creation_failure_description(exc: BaseException) -> str:
     return 'Unable to create the game. Please check the supplied values and try again.'
 
 
+def _is_exclusive_picks_schedule_error(exc: BaseException) -> bool:
+    """True when exclusive picks requires a pick deadline on/before the start date."""
+    message = str(exc)
+    if isinstance(exc, TypeError) and "`pick_date` required when `exclusive_picks` is enabled" in message:
+        return True
+    if (
+        isinstance(exc, ValueError)
+        and "`start_date` must be after `pick_date` when `exclusive_picks` is enabled" in message
+    ):
+        return True
+    return False
+
+
+def _exclusive_picks_schedule_error_embed(state: dict) -> discord.Embed:
+    """Explain the exclusive-picks date conflict and list the current values."""
+    start_date = state.get("start_date") or "not set"
+    pick_date = state.get("pick_date") or "not set"
+    return discord.Embed(
+        title="Pick deadline must be on or before start date",
+        description=(
+            "With **exclusive picks** enabled, players must finish picking on or before the "
+            "game start date.\n\n"
+            f"**Start date:** {start_date}\n"
+            f"**Pick deadline:** {pick_date}\n\n"
+            "Adjust one of the dates, turn off exclusive picks, or cancel creation."
+        ),
+        color=discord.Color.orange(),
+    )
+
+
+async def _edit_wizard_message(
+    interaction: discord.Interaction | None,
+    message: discord.Message | None,
+    *,
+    embed: discord.Embed | None = None,
+    view: discord.ui.View | None = None,
+) -> None:
+    """Edit the wizard prompt, including after an ephemeral interaction was deferred."""
+    edit_kwargs: dict[str, Any] = {}
+    if embed is not None:
+        edit_kwargs["embed"] = embed
+    edit_kwargs["view"] = view
+
+    if message is not None:
+        try:
+            await message.edit(**edit_kwargs)
+            return
+        except discord.NotFound:
+            logger.debug("Wizard message missing; trying followup edit.", exc_info=True)
+        except discord.HTTPException:
+            logger.debug("Wizard message edit failed; trying followup edit.", exc_info=True)
+
+    if interaction is not None and message is not None:
+        try:
+            await interaction.followup.edit_message(message.id, **edit_kwargs)
+            return
+        except discord.HTTPException:
+            logger.debug("Wizard followup edit failed.", exc_info=True)
+
+    if interaction is not None:
+        try:
+            await interaction.edit_original_response(**edit_kwargs)
+        except discord.HTTPException:
+            logger.warning("Could not update wizard message.", exc_info=True)
+
+
 class _WizardRenameModal(discord.ui.Modal, title="Choose a different name"):
     """Modal shown when the wizard game name collides with an existing game."""
 
@@ -646,11 +712,129 @@ class _WizardRenameView(InitiatorOnlyView):
         self.stop()
 
 
+class _WizardDateFixModal(discord.ui.Modal):
+    """Modal to update start or pick date, then retry wizard creation."""
+
+    def __init__(
+        self,
+        *,
+        title: str,
+        label: str,
+        field_key: str,
+        state: dict,
+        message: discord.Message,
+        initiator_id: int,
+    ):
+        super().__init__(title=title, timeout=120)
+        self.field_key = field_key
+        self.state = state
+        self.message = message
+        self.initiator_id = initiator_id
+        self.date_input = discord.ui.TextInput(
+            label=label,
+            placeholder="YYYY-MM-DD",
+            default=str(state.get(field_key) or ""),
+            required=True,
+            max_length=10,
+            min_length=10,
+            style=discord.TextStyle.short,
+        )
+        self.add_item(self.date_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.initiator_id:
+            await interaction.response.send_message(
+                "Only the person who started this wizard can change these settings.",
+                ephemeral=True,
+            )
+            return
+        self.state[self.field_key] = self.date_input.value.strip()
+        await interaction.response.defer(ephemeral=True)
+        await _finalize_wizard_game_creation(
+            interaction,
+            self.state,
+            message=self.message,
+        )
+
+
+class _WizardExclusivePicksFixView(InitiatorOnlyView):
+    """Prompt when exclusive picks and pick/start dates conflict."""
+
+    def __init__(self, *, state: dict, message: discord.Message, initiator_id: int):
+        super().__init__(initiator_id, timeout=120)
+        self.state = state
+        self.wizard_message = message
+
+    @discord.ui.button(label="Change start date", style=discord.ButtonStyle.primary)
+    async def change_start_date(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.send_modal(
+            _WizardDateFixModal(
+                title="Change start date",
+                label="Start date (YYYY-MM-DD)",
+                field_key="start_date",
+                state=self.state,
+                message=self.wizard_message,
+                initiator_id=self.initiator_id,
+            )
+        )
+
+    @discord.ui.button(label="Change pick date", style=discord.ButtonStyle.primary)
+    async def change_pick_date(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.send_modal(
+            _WizardDateFixModal(
+                title="Change pick deadline",
+                label="Pick deadline (YYYY-MM-DD)",
+                field_key="pick_date",
+                state=self.state,
+                message=self.wizard_message,
+                initiator_id=self.initiator_id,
+            )
+        )
+
+    @discord.ui.button(label="Remove exclusive picks", style=discord.ButtonStyle.secondary)
+    async def remove_exclusive_picks(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        self.state["exclusive_picks"] = False
+        await interaction.response.defer(ephemeral=True)
+        await _finalize_wizard_game_creation(
+            interaction,
+            self.state,
+            message=self.wizard_message,
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel_creation(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.edit_message(
+            embed=simple_embed(
+                status='success',
+                title='Game Creation Cancelled',
+                desc='No game was created.',
+            ),
+            view=None,
+        )
+        self.stop()
+
+
 async def _finalize_wizard_game_creation(
     interaction: discord.Interaction,
     state: dict,
     *,
-    message: discord.Message,
+    message: discord.Message | None,
 ) -> None:
     """Try to create the game from wizard state; on name clash offer rename."""
     try:
@@ -667,7 +851,9 @@ async def _finalize_wizard_game_creation(
             update_frequency='alpaca',
             sell_during_game=state.get("sell_during_game", False),
         )
-        await message.edit(
+        await _edit_wizard_message(
+            interaction,
+            message,
             embed=simple_embed(
                 status='success',
                 title='Game Created Successfully',
@@ -678,7 +864,21 @@ async def _finalize_wizard_game_creation(
     except AlreadyExistsError as exc:
         if exc.table == 'games':
             taken = str(exc.duplicate or state["name"])
-            await message.edit(
+            if message is None:
+                await _edit_wizard_message(
+                    interaction,
+                    None,
+                    embed=simple_embed(
+                        status='failed',
+                        title='Game name already taken',
+                        desc=f'**{taken}** is already used by another game.',
+                    ),
+                    view=None,
+                )
+                return
+            await _edit_wizard_message(
+                interaction,
+                message,
                 embed=discord.Embed(
                     title="Game name already taken",
                     description=(
@@ -695,7 +895,9 @@ async def _finalize_wizard_game_creation(
                 ),
             )
             return
-        await message.edit(
+        await _edit_wizard_message(
+            interaction,
+            message,
             embed=simple_embed(
                 status='failed',
                 title='Game Creation Failed',
@@ -704,7 +906,29 @@ async def _finalize_wizard_game_creation(
             view=None,
         )
     except (InvalidDateFormatError, ValueError, TypeError) as exc:
-        await message.edit(
+        if _is_exclusive_picks_schedule_error(exc):
+            if message is None:
+                await _edit_wizard_message(
+                    interaction,
+                    None,
+                    embed=_exclusive_picks_schedule_error_embed(state),
+                    view=None,
+                )
+                return
+            await _edit_wizard_message(
+                interaction,
+                message,
+                embed=_exclusive_picks_schedule_error_embed(state),
+                view=_WizardExclusivePicksFixView(
+                    state=state,
+                    message=message,
+                    initiator_id=state["user_id"],
+                ),
+            )
+            return
+        await _edit_wizard_message(
+            interaction,
+            message,
             embed=simple_embed(
                 status='failed',
                 title='Game Creation Failed',
@@ -714,7 +938,9 @@ async def _finalize_wizard_game_creation(
         )
     except Exception as exc:
         logger.exception('Guided game creation failed', exc_info=exc)
-        await message.edit(
+        await _edit_wizard_message(
+            interaction,
+            message,
             embed=simple_embed(
                 status='failed',
                 title='Game Creation Failed',
@@ -1016,13 +1242,16 @@ async def create_game(interaction: discord.Interaction):
                                 "sell_during_game": sell_during_game,
                             }
                             await confirm_interaction.response.defer(ephemeral=True)
-                            message = confirm_interaction.message
-                            if message is None:
-                                message = await confirm_interaction.original_response()
+                            wizard_message = confirm_interaction.message
+                            if wizard_message is None:
+                                try:
+                                    wizard_message = await confirm_interaction.original_response()
+                                except discord.HTTPException:
+                                    wizard_message = None
                             await _finalize_wizard_game_creation(
                                 confirm_interaction,
                                 wizard_state,
-                                message=message,
+                                message=wizard_message,
                             )
 
                         async def cancel_callback(cancel_interaction: discord.Interaction):
@@ -2833,7 +3062,6 @@ def _game_info_embed(
             f"Starting cash: ${float(game.start_money):,.2f}\n"
             f"Picks per player: {game.pick_count}\n"
             f"Exclusive picks: {'Yes' if game.draft_mode else 'No'}\n"
-            f"Selling enabled: {'Yes' if game.allow_selling else 'No'}\n"
             f"Price updates: {game.update_frequency}"
         ),
         inline=True,
@@ -3133,7 +3361,7 @@ async def my_stocks(
             color=discord.Color.blurple(),
         )
         embed.set_image(url=f"attachment://portfolio_{user_id}_{game_id}.png")
-        embed.set_footer(text="More detail: /game-info")
+        embed.set_footer(text="Leaderboard: /leaderboard | More detail: /game-info")
 
         await interaction.followup.send(
             embed=embed,
