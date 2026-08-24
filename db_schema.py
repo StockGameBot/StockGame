@@ -26,7 +26,7 @@ logger = logging.getLogger("DbSchema")
 # # (YYYY-MM-DD HH:MM:SS) objects should include 'datetime' in the key name
 # # (YYYY-MM-DD) objects should include 'date' in the key name
 
-db_ver = "0.2.4"  # Current schema version
+db_ver = "0.2.5"  # Current schema version
 
 # (from_version, to_version) -> migration function that mutates ``db_name`` in place.
 # When no entry matches a version jump, :func:`ensure_database` remakes empty.
@@ -107,10 +107,77 @@ def _migrate_0_2_3_to_0_2_4(db_name: str) -> None:
         conn.close()
 
 
+def _per_pick_start_value(start_money: float, pick_count: int) -> float | None:
+    """Match GameLogic settlement: per-pick allocation with extra precision when needed."""
+    if pick_count <= 0:
+        return None
+    allocation = float(start_money) / float(pick_count)
+    start_value = round(allocation, 2)
+    if start_value <= 0:
+        start_value = round(allocation, 4)
+    if start_value <= 0:
+        return None
+    return start_value
+
+
+def repair_zero_stock_pick_start_values(db_name: str) -> int:
+    """Backfill stock picks whose ``start_value`` was stored as zero.
+
+    Returns the number of rows updated. Safe to run repeatedly.
+    """
+    conn = sqlite3.connect(db_name)
+    updated = 0
+    try:
+        rows = conn.execute(
+            """
+            SELECT sp.pick_id, sp.current_value, g.start_money, g.pick_count
+            FROM stock_picks sp
+            JOIN game_participants gp ON gp.participation_id = sp.participation_id
+            JOIN games g ON g.game_id = gp.game_id
+            WHERE sp.start_value = 0
+            """
+        ).fetchall()
+        for pick_id, current_value, start_money, pick_count in rows:
+            start_value = _per_pick_start_value(float(start_money), int(pick_count))
+            if start_value is None:
+                logger.warning(
+                    "Skipping pick %s repair: per-pick allocation for game still rounds to zero",
+                    pick_id,
+                )
+                continue
+            dollar_change = None
+            percent_change = None
+            if current_value is not None:
+                dollar_change = float(current_value) - start_value
+                percent_change = (dollar_change / start_value) * 100
+            conn.execute(
+                """
+                UPDATE stock_picks
+                SET start_value = ?, change_dollars = ?, change_percent = ?
+                WHERE pick_id = ?
+                """,
+                (start_value, dollar_change, percent_change, pick_id),
+            )
+            updated += 1
+        if updated:
+            conn.commit()
+    finally:
+        conn.close()
+    return updated
+
+
+def _migrate_0_2_4_to_0_2_5(db_name: str) -> None:
+    """Backfill stock picks that lost their start_value to zero-cent rounding."""
+    repaired = repair_zero_stock_pick_start_values(db_name)
+    if repaired:
+        logger.info("Repaired %s stock pick(s) with zero start_value", repaired)
+
+
 MIGRATIONS: dict[tuple[str, str], MigrationFn] = {
     ("0.2.1", "0.2.2"): _migrate_0_2_1_to_0_2_2,
     ("0.2.2", "0.2.3"): _migrate_0_2_2_to_0_2_3,
     ("0.2.3", "0.2.4"): _migrate_0_2_3_to_0_2_4,
+    ("0.2.4", "0.2.5"): _migrate_0_2_4_to_0_2_5,
 }
 
 
@@ -227,6 +294,13 @@ def ensure_database(db_name: str, *, target_version: str = db_ver) -> str:
     current = _read_db_version(db_name)
     if current == target_version:
         create(db_name, upgrade=False)
+        repaired = repair_zero_stock_pick_start_values(db_name)
+        if repaired:
+            logger.info(
+                "Repaired %s stock pick(s) with zero start_value in %s",
+                repaired,
+                db_name,
+            )
         return "unchanged"
 
     migrator = MIGRATIONS.get((current or "", target_version))
@@ -255,7 +329,7 @@ def ensure_database(db_name: str, *, target_version: str = db_ver) -> str:
 def create(db_name:str, upgrade:bool=True):
     """Create database schema tables.
 
-    Version: 0.2.4
+    Version: 0.2.5
 
     Args:
         db_name (str): Database name
@@ -263,6 +337,10 @@ def create(db_name:str, upgrade:bool=True):
             ``db_ver``, run :func:`ensure_database` (migrate or remake). Defaults to True.
 
     # Changelog
+
+    ## [0.2.5] - 2026-08-24
+    ### Fixed
+    - Backfill stock picks whose ``start_value`` was stored as zero after low starting-cash games
 
     ## [0.2.4] - 2026-08-19
     ### Added
