@@ -3062,7 +3062,6 @@ def _game_info_embed(
             f"Starting cash: ${float(game.start_money):,.2f}\n"
             f"Picks per player: {game.pick_count}\n"
             f"Exclusive picks: {'Yes' if game.draft_mode else 'No'}\n"
-            f"Selling enabled: {'Yes' if game.allow_selling else 'No'}\n"
             f"Price updates: {game.update_frequency}"
         ),
         inline=True,
