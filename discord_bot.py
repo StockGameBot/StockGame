@@ -1503,12 +1503,12 @@ async def create_recurring_game(
             if private_game:
                 embed.set_footer(
                     text=(
-                        f"Created by {interaction.user.display_name} · Template ID {template_id} · "
+                        f"Created by {interaction.user.display_name} | Template ID {template_id} | "
                         "Private: /join-game needs approval; owner /invite joins immediately"
                     )
                 )
             else:
-                embed.set_footer(text=f"Created by {interaction.user.display_name} · Template ID {template_id}")
+                embed.set_footer(text=f"Created by {interaction.user.display_name} | Template ID {template_id}")
 
             await interaction.followup.send(embed=embed, ephemeral=ephemeral_test)
             if push_leaderboard:
@@ -2682,6 +2682,153 @@ async def remove_stock(interaction: discord.Interaction, game_id: str, ticker: s
 # TODO Add buttons for buying stocks?
 # TODO Add buttons for buying/selling stocks?  # selling not implemented yet
 
+
+def _bot_can_share_in_channel(
+    channel: discord.abc.GuildChannel,
+    me: discord.Member,
+) -> bool:
+    """Return True if the bot can post an image + text in ``channel``."""
+    perms = channel.permissions_for(me)
+    return bool(
+        perms.view_channel
+        and perms.send_messages
+        and perms.attach_files
+    )
+
+
+def _share_attribution_line(
+    user: discord.User | discord.Member,
+    *,
+    context: str,
+) -> str:
+    return f"Shared by {user.mention} | {context}"
+
+
+async def _post_shared_image(
+    interaction: discord.Interaction,
+    *,
+    png_bytes: bytes,
+    filename: str,
+    context: str,
+) -> None:
+    """Post an image and attribution line publicly in the command channel."""
+    channel = interaction.channel
+    if not isinstance(channel, discord.TextChannel):
+        await interaction.followup.send(
+            embed=simple_embed(
+                status="failed",
+                title="Cannot share here",
+                desc="Sharing is only available in a server text channel.",
+            ),
+            ephemeral=True,
+        )
+        return
+
+    guild = channel.guild
+    me = guild.me if guild else None
+    if me is None or not _bot_can_share_in_channel(channel, me):
+        logger.warning(
+            "Share denied in channel %s for user %s (%s): missing view/send/attach permissions",
+            channel.id,
+            interaction.user.id,
+            context,
+        )
+        await interaction.followup.send(
+            embed=simple_embed(
+                status="failed",
+                title="Cannot share here",
+                desc=(
+                    "I don't have permission to post images in this channel. "
+                    "Ask a moderator to allow **View Channel**, **Send Messages**, "
+                    "and **Attach Files** for me."
+                ),
+            ),
+            ephemeral=True,
+        )
+        return
+
+    content = _share_attribution_line(interaction.user, context=context)
+    file = discord.File(io.BytesIO(png_bytes), filename=filename)
+    try:
+        await channel.send(content=content, file=file)
+    except discord.HTTPException as exc:
+        logger.warning(
+            "Share failed in channel %s for user %s (%s): %s",
+            channel.id,
+            interaction.user.id,
+            context,
+            exc,
+        )
+        await interaction.followup.send(
+            embed=simple_embed(
+                status="failed",
+                title="Share failed",
+                desc="Something went wrong while posting to the channel. Try again in a moment.",
+            ),
+            ephemeral=True,
+        )
+        return
+
+
+async def _disable_expired_view(
+    view: discord.ui.View,
+    interaction: discord.Interaction,
+) -> None:
+    """Gray out view controls when the interaction window closes."""
+    for item in view.children:
+        if isinstance(item, (discord.ui.Button, discord.ui.Select)):
+            item.disabled = True
+    try:
+        message = await interaction.original_response()
+        await message.edit(view=view)
+    except discord.HTTPException:
+        pass
+
+
+class PortfolioShareView(discord.ui.View):
+    """Ephemeral portfolio viewer with a public Share action."""
+
+    def __init__(
+        self,
+        interaction: discord.Interaction,
+        *,
+        png_bytes: bytes,
+        filename: str,
+        context: str,
+    ):
+        super().__init__(timeout=600)
+        self.interaction = interaction
+        self.png_bytes = png_bytes
+        self.filename = filename
+        self.context = context
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.interaction.user.id:
+            return True
+        await interaction.response.send_message(
+            "Only you can share this portfolio.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(label="Share", style=discord.ButtonStyle.success)
+    async def share(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await _post_shared_image(
+            interaction,
+            png_bytes=self.png_bytes,
+            filename=self.filename,
+            context=self.context,
+        )
+
+    async def on_timeout(self) -> None:
+        await _disable_expired_view(self, self.interaction)
+
+
 class UserLeaderboardView(discord.ui.View):
     """Browse games with outer controls and rank pages with inner controls."""
 
@@ -2747,6 +2894,24 @@ class UserLeaderboardView(discord.ui.View):
             )
             next_game.callback = self._next_game  # type: ignore[method-assign]
             self.add_item(next_game)
+
+        share = discord.ui.Button(label="Share", style=discord.ButtonStyle.success)
+        share.callback = self._share  # type: ignore[method-assign]
+        self.add_item(share)
+
+    def _share_context(self) -> str:
+        return f"Leaderboard | {self.current_game.get('title', 'Game')}"
+
+    async def _share(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self.prepare()
+        page = self.rank_pages[self.rank_page_index]
+        await _post_shared_image(
+            interaction,
+            png_bytes=page["png"],
+            filename=page["filename"],
+            context=self._share_context(),
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.interaction.user.id:
@@ -2820,11 +2985,7 @@ class UserLeaderboardView(discord.ui.View):
         await self._edit(interaction)
 
     async def on_timeout(self) -> None:
-        try:
-            message = await self.interaction.original_response()
-            await message.edit(view=None)
-        except discord.HTTPException:
-            pass
+        await _disable_expired_view(self, self.interaction)
 
 
 async def resolve_player_name(user_id: int, guild: discord.Guild | None) -> str:
@@ -3204,7 +3365,7 @@ async def leaderboard_cmd(
             if entry.user_id == user_id:
                 d_chg = float(entry.change_dollars or 0)
                 p_chg = float(entry.change_percent or 0)
-                rank_desc = f"Your rank: **#{i}** · ${d_chg:+,.2f} ({p_chg:+.2f}%)"
+                rank_desc = f"Your rank: **#{i}** | ${d_chg:+,.2f} ({p_chg:+.2f}%)"
                 break
         games.append(
             _leaderboard_game_data(
@@ -3331,8 +3492,9 @@ async def my_stocks(
             interaction.user.display_name,
         )
 
-        # Create Discord file
-        file = discord.File(image_buffer, filename=f"portfolio_{user_id}_{game_id}.png")
+        png_bytes = image_buffer.getvalue()
+        filename = f"portfolio_{user_id}_{game_id}.png"
+        file = discord.File(io.BytesIO(png_bytes), filename=filename)
 
         game = info.game
         rank_line = "Not ranked yet"
@@ -3341,7 +3503,7 @@ async def my_stocks(
                 if entry.user_id == user_id:
                     d_chg = float(entry.change_dollars or 0)
                     p_chg = float(entry.change_percent or 0)
-                    rank_line = f"**#{i}** · ${d_chg:+,.2f} ({p_chg:+.2f}%)"
+                    rank_line = f"**#{i}** | ${d_chg:+,.2f} ({p_chg:+.2f}%)"
                     break
 
         status_label = game.status
@@ -3352,7 +3514,7 @@ async def my_stocks(
         )
         notice = _prestart_notice(game)
         body = (
-            f"Game `{game.id}` · **{status_label}**\n"
+            f"Game `{game.id}` | **{status_label}**\n"
             f"{pick_line}\n"
             f"Your rank: {rank_line}\n"
             f"Picks remaining: **{remaining}** / {game.pick_count} "
@@ -3363,12 +3525,19 @@ async def my_stocks(
             description=f"{notice}\n\n{body}" if notice else body,
             color=discord.Color.blurple(),
         )
-        embed.set_image(url=f"attachment://portfolio_{user_id}_{game_id}.png")
+        embed.set_image(url=f"attachment://{filename}")
         embed.set_footer(text="Leaderboard: /leaderboard | More detail: /game-info")
 
+        share_view = PortfolioShareView(
+            interaction,
+            png_bytes=png_bytes,
+            filename=filename,
+            context=f"Portfolio | {game.name} [{game.id}]",
+        )
         await interaction.followup.send(
             embed=embed,
             file=file,
+            view=share_view,
             ephemeral=ephemeral_test,
         )
         
