@@ -168,3 +168,50 @@ def test_format_listed_game_private_lock_emoji():
     title, _body = db._format_listed_game(game, 2)
     assert "🔒" in title
     assert "[G1]" in title
+
+
+def test_user_can_view_portfolio_public_game_allows_other_players(mocker):
+    import discord_bot as db
+
+    public = SimpleNamespace(id="PUB1", private_game=False, owner_id=10)
+    mocker.patch.object(
+        db,
+        "fe",
+        SimpleNamespace(
+            be=SimpleNamespace(
+                get_many_participants=lambda **_kwargs: (
+                    SimpleNamespace(status="active"),
+                )
+            )
+        ),
+    )
+    allowed, reason = db._user_can_view_portfolio(public, viewer_user_id=99, subject_user_id=20)
+    assert allowed
+    assert reason is None
+
+
+def test_user_can_view_portfolio_private_game_blocks_other_players():
+    import discord_bot as db
+
+    private = SimpleNamespace(id="PRIV", private_game=True, owner_id=10)
+    allowed, reason = db._user_can_view_portfolio(
+        private,
+        viewer_user_id=99,
+        subject_user_id=20,
+    )
+    assert not allowed
+    assert reason is not None
+    assert "public games" in reason.lower()
+
+
+def test_user_can_view_portfolio_self_always_allowed():
+    import discord_bot as db
+
+    private = SimpleNamespace(id="PRIV", private_game=True, owner_id=10)
+    allowed, reason = db._user_can_view_portfolio(
+        private,
+        viewer_user_id=10,
+        subject_user_id=10,
+    )
+    assert allowed
+    assert reason is None

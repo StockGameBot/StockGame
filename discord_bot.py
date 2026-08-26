@@ -3376,6 +3376,28 @@ def _user_can_view_game_info(game, user_id: int) -> bool:
     return any(player.status == "active" for player in participants)
 
 
+def _user_can_view_portfolio(
+    game,
+    viewer_user_id: int,
+    subject_user_id: int,
+) -> tuple[bool, str | None]:
+    """Return whether ``viewer_user_id`` may view ``subject_user_id``'s portfolio."""
+    if subject_user_id == viewer_user_id:
+        return True, None
+    if game.private_game:
+        return False, "You can only view other players' portfolios in public games."
+    try:
+        participants = fe.be.get_many_participants(
+            game_id=game.id,
+            user_id=subject_user_id,
+        )
+    except LookupError:
+        return False, "That user is not participating in this game."
+    if participants[0].status != "active":
+        return False, "That user is not an active participant in this game."
+    return True, None
+
+
 def _leaderboard_browse_games(user_id: int) -> list[tuple[Any, int]]:
     """User's games followed by public recurring games they are not in."""
     try:
@@ -3542,20 +3564,57 @@ def _build_my_stocks_portfolio(user_id: int, game_id: str, display_name: str):
     return info, image_buffer, remaining, total
 
 
-@bot.tree.command(name="my-stocks", description="View your stocks in a game as a visual portfolio")
-@app_commands.autocomplete(game_id=ac.all_games_autocomplete)
+@bot.tree.command(
+    name="my-stocks",
+    description="View a portfolio in a game (yours by default, or another player in public games)",
+)
+@app_commands.autocomplete(game_id=ac.game_info_autocomplete)
 @app_commands.describe(
-    game_id="ID of the game"
+    game_id="ID of the game",
+    user="Another player to view (public games only)",
 )
 async def my_stocks(
     interaction: discord.Interaction,
-    game_id: str
+    game_id: str,
+    user: discord.User | None = None,
 ):
-    user_id = interaction.user.id
+    viewer_id = interaction.user.id
+    subject_id = user.id if user is not None else viewer_id
+    viewing_other = subject_id != viewer_id
     await interaction.response.defer(ephemeral=ephemeral_test)
 
     try:
-        participant = await asyncio.to_thread(_participant_for_game, user_id, game_id)
+        game = await asyncio.to_thread(fe.be.get_game, game_id)
+    except LookupError:
+        await interaction.followup.send(
+            embed=simple_embed(
+                status="failed",
+                title="Game Not Found",
+                desc=f"No game with ID {game_id} found.",
+            ),
+            ephemeral=ephemeral_test,
+        )
+        return
+
+    allowed, denial = await asyncio.to_thread(
+        _user_can_view_portfolio,
+        game,
+        viewer_id,
+        subject_id,
+    )
+    if not allowed:
+        await interaction.followup.send(
+            embed=simple_embed(
+                status="failed",
+                title="Cannot View Portfolio",
+                desc=denial or "You cannot view this portfolio.",
+            ),
+            ephemeral=ephemeral_test,
+        )
+        return
+
+    if not viewing_other:
+        participant = await asyncio.to_thread(_participant_for_game, subject_id, game_id)
         if participant is None:
             await interaction.followup.send(
                 embed=simple_embed(
@@ -3595,22 +3654,25 @@ async def my_stocks(
             )
             return
 
+    subject_name = await resolve_player_name(subject_id, interaction.guild)
+
+    try:
         info, image_buffer, remaining, total = await asyncio.to_thread(
             _build_my_stocks_portfolio,
-            user_id,
+            subject_id,
             game_id,
-            interaction.user.display_name,
+            subject_name,
         )
 
         png_bytes = image_buffer.getvalue()
-        filename = f"portfolio_{user_id}_{game_id}.png"
+        filename = f"portfolio_{subject_id}_{game_id}.png"
         file = discord.File(io.BytesIO(png_bytes), filename=filename)
 
         game = info.game
         rank_line = "Not ranked yet"
         if info.leaderboard:
             for i, entry in enumerate(info.leaderboard, start=1):
-                if entry.user_id == user_id:
+                if entry.user_id == subject_id:
                     d_chg = float(entry.change_dollars or 0)
                     p_chg = float(entry.change_percent or 0)
                     rank_line = f"**#{i}** | ${d_chg:+,.2f} ({p_chg:+.2f}%)"
@@ -3623,26 +3685,33 @@ async def my_stocks(
             else "Buy anytime"
         )
         notice = _prestart_notice(game)
+        rank_label = f"{subject_name}'s rank" if viewing_other else "Your rank"
+        picks_label = f"{subject_name}'s picks remaining" if viewing_other else "Picks remaining"
         body = (
             f"Game `{game.id}` | **{status_label}**\n"
             f"{pick_line}\n"
-            f"Your rank: {rank_line}\n"
-            f"Picks remaining: **{remaining}** / {game.pick_count} "
+            f"{rank_label}: {rank_line}\n"
+            f"{picks_label}: **{remaining}** / {game.pick_count} "
             f"(${float(game.start_money) / int(game.pick_count):,.2f} per pick)"
         )
+        title = game.name if not viewing_other else f"{game.name} — {subject_name}"
         embed = discord.Embed(
-            title=f"{game.name}",
+            title=title,
             description=f"{notice}\n\n{body}" if notice else body,
             color=discord.Color.blurple(),
         )
         embed.set_image(url=f"attachment://{filename}")
         embed.set_footer(text="Leaderboard: /leaderboard | More detail: /game-info")
 
+        share_context = f"Portfolio | {game.name} [{game.id}]"
+        if viewing_other:
+            share_context = f"{share_context} | {subject_name}"
+
         share_view = PortfolioShareView(
             interaction,
             png_bytes=png_bytes,
             filename=filename,
-            context=f"Portfolio | {game.name} [{game.id}]",
+            context=share_context,
         )
         await interaction.followup.send(
             embed=embed,
@@ -3652,39 +3721,72 @@ async def my_stocks(
         )
         
     except DoesntExistError:
-        embed = simple_embed(
-            status='failed', 
-            title='Not in Game',
-            desc='You are not currently participating in this game. You can try to join it using the join-game command.'
-        )
+        if viewing_other:
+            embed = simple_embed(
+                status='failed',
+                title='No Portfolio',
+                desc=f'{subject_name} is not participating in game #{game_id}.',
+            )
+        else:
+            embed = simple_embed(
+                status='failed', 
+                title='Not in Game',
+                desc='You are not currently participating in this game. You can try to join it using the join-game command.'
+            )
         await interaction.followup.send(embed=embed, ephemeral=ephemeral_test)
         
     except LookupError:
         try:
-            remaining, total = await asyncio.to_thread(fe.pick_capacity, user_id, game_id)
+            remaining, total = await asyncio.to_thread(fe.pick_capacity, subject_id, game_id)
             game = (await asyncio.to_thread(fe.game_info, game_id, False)).game
             notice = _prestart_notice(game)
-            body = (
-                f'You have not bought any stocks in game #{game_id}. '
-                f'Use `/buy-stock` to make your first pick.\n'
-                f'**Picks remaining:** {remaining} of {total}\n'
-                f'**Allocated per pick:** ${float(game.start_money) / total:,.2f}'
-            )
+            if viewing_other:
+                body = (
+                    f'{subject_name} has not bought any stocks in game #{game_id} yet.\n'
+                    f'**Picks remaining:** {remaining} of {total}\n'
+                    f'**Allocated per pick:** ${float(game.start_money) / total:,.2f}'
+                )
+                title = f'No Stocks Yet — {subject_name}'
+            else:
+                body = (
+                    f'You have not bought any stocks in game #{game_id}. '
+                    f'Use `/buy-stock` to make your first pick.\n'
+                    f'**Picks remaining:** {remaining} of {total}\n'
+                    f'**Allocated per pick:** ${float(game.start_money) / total:,.2f}'
+                )
+                title = 'No Stocks Yet'
             embed = discord.Embed(
-                title='No Stocks Yet',
+                title=title,
                 description=f"{notice}\n\n{body}" if notice else body,
                 color=discord.Color.blue(),
             )
         except (DoesntExistError, LookupError):
-            embed = simple_embed(status='failed', title='Not in Game', desc=f'You are not participating in game #{game_id}.')
+            if viewing_other:
+                embed = simple_embed(
+                    status='failed',
+                    title='No Portfolio',
+                    desc=f'{subject_name} is not participating in game #{game_id}.',
+                )
+            else:
+                embed = simple_embed(
+                    status='failed',
+                    title='Not in Game',
+                    desc=f'You are not participating in game #{game_id}.',
+                )
         await interaction.followup.send(embed=embed, ephemeral=ephemeral_test)
         
     except Exception as e:
-        logger.exception(f'User: {interaction.user.id} tried to generate portfolio image for game: {game_id}. Error: {e}')
+        logger.exception(
+            'User: %s tried to generate portfolio image for user %s in game: %s. Error: %s',
+            viewer_id,
+            subject_id,
+            game_id,
+            e,
+        )
         embed = simple_embed(
             status='failed',
             title='Error Generating Portfolio',
-            desc='An unexpected error occurred while generating your portfolio image'
+            desc='An unexpected error occurred while generating the portfolio image',
         )
         await interaction.followup.send(embed=embed, ephemeral=ephemeral_test)
 
