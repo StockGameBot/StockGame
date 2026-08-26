@@ -64,13 +64,12 @@ except ValueError as exc:
     raise RuntimeError('OWNER must be a numeric Discord user ID.') from exc
     
 
-# Set up intents with all necessary permissions
-intents = discord.Intents.default()
-intents.message_content = True
-intents.messages = True
+# Slash commands + member lookups only; no message-content or presence intents.
+# Members Intent stays on for fetch_member(), but we do not cache every guild member in RAM.
+intents = discord.Intents.none()
 intents.guilds = True
 intents.members = True
-# intents.dm_messages = True # for invite user command
+member_cache_flags = discord.MemberCacheFlags.none()
 
 # Testing variables
 ephemeral_test = True # Set to False for testing, True for production
@@ -368,7 +367,11 @@ async def process_pending_user(interaction: discord.Interaction, game_id: str, p
     else:
         await interaction.edit_original_response(embed=embed, view=view)
 
-bot = commands.Bot(command_prefix="$", intents=intents)
+bot = commands.Bot(
+    command_prefix="$",
+    intents=intents,
+    member_cache_flags=member_cache_flags,
+)
 logger.info(f'Connecting with DB: {DB_NAME}')
 fe = Frontend(database_name=DB_NAME, owner_user_id=OWNER_ID, source='discord') # Frontend
 ac.init_autocomplete(fe)  # Inject the shared Frontend instance into autocomplete module
@@ -3934,7 +3937,7 @@ if __name__ == '__main__':
             )
         except discord.errors.PrivilegedIntentsRequired:
             logger.critical(
-                "Discord privileged intents required. Enable Message Content / Members "
+                "Discord privileged intents required. Enable Server Members Intent "
                 "in the Discord Developer Portal.",
                 exc_info=True,
             )
