@@ -237,9 +237,8 @@ def test_find_stock_returns_existing_and_adds_from_market_data(be, mocker):
     logic = GameLogic(be.sql.db)
     assert logic.find_stock("EXIST") == "EXIST"
 
-    mocker.patch.object(logic.alpaca, "get_latest_prices", return_value={"NEWCO": 12.5})
+    mocker.patch.object(logic.alpaca, "lookup_equity_price", return_value=(12.5, "found"))
     mocker.patch("helpers.equity_meta.lookup_company_name", return_value="New Company Inc.")
-    mocker.patch.object(logic.alpaca, "get_us_equity", side_effect=RuntimeError("401"))
     assert logic.find_stock("NEWCO") == "NEWCO"
     assert be.get_stock("NEWCO").company == "New Company Inc."
 
@@ -254,13 +253,38 @@ def test_find_stock_backfills_placeholder_company_name(be, mocker):
 
 def test_find_stock_raises_when_market_data_misses(be, mocker):
     logic = GameLogic(be.sql.db)
-    mocker.patch.object(logic.alpaca, "get_latest_prices", return_value={})
+    mocker.patch.object(logic.alpaca, "lookup_equity_price", return_value=(None, "not_found"))
     with pytest.raises(ValueError, match="Unable to find stock"):
         logic.find_stock("NOSUCH")
+    assert be.is_ticker_invalid("NOSUCH")
 
 
 def test_find_stock_raises_when_price_fetch_errors(be, mocker):
     logic = GameLogic(be.sql.db)
-    mocker.patch.object(logic.alpaca, "get_latest_prices", side_effect=RuntimeError("boom"))
-    with pytest.raises(ValueError, match="Unable to find stock"):
+    mocker.patch.object(logic.alpaca, "lookup_equity_price", return_value=(None, "unavailable"))
+    with pytest.raises(RuntimeError, match="temporarily unavailable"):
         logic.find_stock("RACE")
+    assert not be.is_ticker_invalid("RACE")
+
+
+def test_find_stock_uses_invalid_cache_without_api_call(be, mocker):
+    logic = GameLogic(be.sql.db)
+    be.record_invalid_ticker("FAKE1")
+    lookup = mocker.patch.object(logic.alpaca, "lookup_equity_price")
+    with pytest.raises(ValueError, match="Unable to find stock"):
+        logic.find_stock("FAKE1")
+    lookup.assert_not_called()
+
+
+def test_find_stock_refreshes_expired_invalid_cache(be, mocker):
+    logic = GameLogic(be.sql.db)
+    be.record_invalid_ticker("RETRY")
+    be.sql.update(
+        "invalid_stocks",
+        {"expires_at": "2000-01-01 00:00:00"},
+        filters={"ticker": "RETRY"},
+    )
+    mocker.patch.object(logic.alpaca, "lookup_equity_price", return_value=(10.0, "found"))
+    mocker.patch("helpers.equity_meta.lookup_company_name", return_value="Retry Co")
+    assert logic.find_stock("RETRY") == "RETRY"
+    assert not be.is_ticker_invalid("RETRY")

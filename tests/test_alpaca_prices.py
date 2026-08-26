@@ -46,6 +46,23 @@ def test_get_latest_prices_retries_missing_symbols_individually(alpaca, mocker):
     assert prices == {"AAA": 11.5, "BBB": 22.5}
 
 
+def test_lookup_equity_price_distinguishes_missing_and_unavailable(alpaca, mocker):
+    fetch = mocker.patch.object(
+        alpaca,
+        "_fetch_snapshots_with_retries",
+        side_effect=[None, {"BBB": _snap(1.0)}, {}],
+    )
+    price, status = alpaca.lookup_equity_price("AAA")
+    assert price is None and status == "unavailable"
+
+    price, status = alpaca.lookup_equity_price("BBB")
+    assert price == 1.0 and status == "found"
+
+    price, status = alpaca.lookup_equity_price("ZZZ")
+    assert price is None and status == "not_found"
+    assert fetch.call_count == 3
+
+
 def test_get_latest_prices_does_not_skip_rest_of_universe_after_batch_failure(alpaca, mocker):
     # Force small batches by temporarily using a tiny universe across two batches.
     # With BATCH_SIZE=100, build 101 symbols so we get two batches.

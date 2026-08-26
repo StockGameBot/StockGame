@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from urllib.parse import quote
 
 import requests
@@ -150,6 +150,27 @@ class AlpacaMarketData:
         r.raise_for_status()
         data = r.json()
         return data if isinstance(data, dict) else {}
+
+    def lookup_equity_price(
+        self,
+        ticker: str,
+    ) -> tuple[Optional[float], Literal["found", "not_found", "unavailable"]]:
+        """Look up a single equity price without batch side effects.
+
+        Returns ``(price, status)`` where status distinguishes a missing symbol
+        from transient API failures.
+        """
+        self._require_configured()
+        db_ticker = to_db_ticker(ticker)
+        alpaca_sym = to_alpaca_symbol(db_ticker)
+        data = self._fetch_snapshots_with_retries([alpaca_sym], attempts=3)
+        if data is None:
+            return None, "unavailable"
+        snap = data.get(alpaca_sym)
+        price = price_from_snapshot(snap) if isinstance(snap, dict) else None
+        if price is None:
+            return None, "not_found"
+        return price, "found"
 
     def get_latest_prices(self, tickers: list[str]) -> dict[str, float]:
         """

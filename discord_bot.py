@@ -2522,87 +2522,197 @@ async def update(
 
 # STOCK RELATED
 
-@bot.tree.command(name="buy-stock", description="Buy a stock in a game")
-@app_commands.autocomplete(game_id=ac.all_games_autocomplete, ticker=ac.buy_ticker_autocomplete)
+def _collect_buy_tickers(*values: str | None) -> list[str]:
+    """Normalize and dedupe ticker inputs while preserving order."""
+    tickers: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value is None:
+            continue
+        raw = value.strip().upper()
+        if not raw or raw in seen:
+            continue
+        seen.add(raw)
+        tickers.append(raw)
+    return tickers
+
+
+def _buy_stock_outcome(
+    user_id: int,
+    game_id: str,
+    ticker: str,
+) -> tuple[str, str, str]:
+    """Attempt one stock purchase and return ``(status, title, description)``."""
+    status = "failed"
+    title = "Stock Purchase Failed"
+    description = "An unexpected error occurred while trying to buy the stock. Please try again or contact a moderator."
+    try:
+        fe.buy_stock(user_id=user_id, game_id=game_id, ticker=ticker)
+        remaining, total = fe.pick_capacity(user_id, game_id)
+        return (
+            "success",
+            "Stock Purchased",
+            f"Added {ticker} to game #{game_id}. {remaining} of {total} picks remaining.",
+        )
+    except ValueError as exc:
+        if "Invalid Ticker, too long!" in str(exc):
+            description = f"The ticker {ticker} is not valid!"
+        elif "Stock is not tradeable" in str(exc):
+            description = (
+                f"The ticker {ticker} is not tradeable. "
+                "This can occur when a stock is private or has been delisted."
+            )
+        elif "Unable to find stock" in str(exc) or "Failed to add `ticker`" in str(exc):
+            description = (
+                f"The ticker {ticker} was not found. "
+                "Double check your spelling and try again!"
+            )
+        else:
+            logger.exception(
+                "Uncaught value error user: %s tried to buy stock with ticker: %s",
+                user_id,
+                ticker,
+                exc_info=exc,
+            )
+            description = "An error ocurred while finding your stock."
+    except LookupError:
+        description = f"No game with ID {game_id} found."
+    except NotAllowedError as exc:
+        if exc.reason == "Not active":
+            try:
+                participant = fe.be.get_many_participants(user_id=user_id, game_id=game_id)[0]
+                if participant.status == "pending":
+                    description = (
+                        "Your request to join this private game is still awaiting owner approval."
+                    )
+                else:
+                    description = f"You are not currently allowed to buy stocks in game #{game_id}."
+            except (LookupError, IndexError):
+                description = f"You are not currently allowed to buy stocks in game #{game_id}."
+        elif exc.reason == "Maximum picks reached":
+            title = "Game Pick Limit Reached"
+            description = (
+                "You have reached the maximum number of picks for this game.\n"
+                "To add another stock, you need to remove one of your current picks."
+            )
+        elif exc.reason == "Past pick_date":
+            description = "The pick date for this game has passed, so you can no longer pick stocks."
+    except AlreadyExistsError:
+        description = f"You already own {ticker} in this game!"
+    except DoesntExistError as exc:
+        if exc.table == "game_participants":
+            description = f"You are not in the game: {game_id}."
+    except RuntimeError as exc:
+        if "temporarily unavailable" in str(exc).lower():
+            description = "Stock lookup is temporarily unavailable. Try again in a moment."
+        else:
+            logger.exception(
+                "User: %s tried to buy the stock: %s in game: %s. Error: %s",
+                user_id,
+                ticker,
+                game_id,
+                exc,
+            )
+    except Exception as exc:
+        logger.exception(
+            "User: %s tried to buy the stock: %s in game: %s. Error: %s",
+            user_id,
+            ticker,
+            game_id,
+            exc,
+        )
+    return status, title, description
+
+
+@bot.tree.command(name="buy-stock", description="Buy up to 10 stocks in a game")
+@app_commands.autocomplete(
+    game_id=ac.all_games_autocomplete,
+    ticker=ac.buy_ticker_autocomplete,
+    ticker_2=ac.buy_ticker_autocomplete,
+    ticker_3=ac.buy_ticker_autocomplete,
+    ticker_4=ac.buy_ticker_autocomplete,
+    ticker_5=ac.buy_ticker_autocomplete,
+    ticker_6=ac.buy_ticker_autocomplete,
+    ticker_7=ac.buy_ticker_autocomplete,
+    ticker_8=ac.buy_ticker_autocomplete,
+    ticker_9=ac.buy_ticker_autocomplete,
+    ticker_10=ac.buy_ticker_autocomplete,
+)
 @app_commands.describe(
     game_id="ID of the game",
-    ticker="Stock ticker symbol"
+    ticker="First stock ticker symbol",
+    ticker_2="Optional second ticker",
+    ticker_3="Optional third ticker",
+    ticker_4="Optional fourth ticker",
+    ticker_5="Optional fifth ticker",
+    ticker_6="Optional sixth ticker",
+    ticker_7="Optional seventh ticker",
+    ticker_8="Optional eighth ticker",
+    ticker_9="Optional ninth ticker",
+    ticker_10="Optional tenth ticker",
 )
 async def buy_stock(
-    interaction: discord.Interaction, 
-    game_id: str, 
-    ticker: str
+    interaction: discord.Interaction,
+    game_id: str,
+    ticker: str,
+    ticker_2: str | None = None,
+    ticker_3: str | None = None,
+    ticker_4: str | None = None,
+    ticker_5: str | None = None,
+    ticker_6: str | None = None,
+    ticker_7: str | None = None,
+    ticker_8: str | None = None,
+    ticker_9: str | None = None,
+    ticker_10: str | None = None,
 ):
-    await interaction.response.defer(ephemeral=ephemeral_test) # Defer the response to allow time for the update
-    status = 'failed' # Start with failed status
-    title = 'Stock Purchase Failed'
-    try:
-        ticker = ticker.upper()
-        await asyncio.to_thread(
-            fe.buy_stock,
-            user_id=interaction.user.id,
-            game_id=game_id,
-            ticker=ticker,
-        )
+    await interaction.response.defer(ephemeral=ephemeral_test)
+    tickers = _collect_buy_tickers(
+        ticker,
+        ticker_2,
+        ticker_3,
+        ticker_4,
+        ticker_5,
+        ticker_6,
+        ticker_7,
+        ticker_8,
+        ticker_9,
+        ticker_10,
+    )
+
+    if len(tickers) == 1:
+        single_ticker = tickers[0]
+
+        def run_single() -> tuple[str, str, str]:
+            return _buy_stock_outcome(interaction.user.id, game_id, single_ticker)
+
+        status, title, description = await asyncio.to_thread(run_single)
+    else:
+        results: list[tuple[str, str, str, str]] = []
+
+        def run_batch() -> list[tuple[str, str, str, str]]:
+            batch: list[tuple[str, str, str, str]] = []
+            for symbol in tickers:
+                outcome = _buy_stock_outcome(interaction.user.id, game_id, symbol)
+                batch.append((symbol, *outcome))
+            return batch
+
+        results = await asyncio.to_thread(run_batch)
+        lines: list[str] = []
+        any_success = False
+        for symbol, item_status, _item_title, item_desc in results:
+            prefix = "✅" if item_status == "success" else "❌"
+            lines.append(f"{prefix} **{symbol}**: {item_desc}")
+            any_success = any_success or item_status == "success"
         remaining, total = fe.pick_capacity(interaction.user.id, game_id)
-        title = 'Stock Purchased'
-        description = f'Added {ticker} to game #{game_id}. {remaining} of {total} picks remaining.'
-        status = 'success'
+        lines.append(f"\n{remaining} of {total} picks remaining.")
+        status = "success" if any_success else "failed"
+        title = "Stock Purchases"
+        description = "\n".join(lines)
 
-    except ValueError as exc:
-        if 'Invalid Ticker, too long!' in str(exc):
-            description = f'The ticker {ticker} is not valid!'
-        
-        elif 'Stock is not tradeable' in str(exc):
-            description = f'The ticker {ticker} is not tradeable.  This can occur when a stock is private or has been delisted.'
-            
-        elif 'Unable to find stock' in str(exc) or 'Failed to add `ticker`' in str(exc):
-            description = f'The ticker {ticker} was not found.  Double check your spelling and try again!'
-        
-        else:
-            logger.exception(f'Uncaught value error user: {interaction.user.id} tried to buy stock with ticker: {ticker}', exc_info=exc)
-            description = 'An error ocurred while finding your stock.'
-    
-    except LookupError:
-        description = f'No game with ID {game_id} found.'
-    
-    except NotAllowedError as exc: # REASONS ARE NOW IN THE DOCSTRING OF buy_stock!!
-        if exc.reason == 'Not active':
-            try:
-                participant = fe.be.get_many_participants(user_id=interaction.user.id, game_id=game_id)[0]
-                if participant.status == 'pending':
-                    description = 'Your request to join this private game is still awaiting owner approval.'
-                else:
-                    description = f'You are not currently allowed to buy stocks in game #{game_id}.'
-            except (LookupError, IndexError):
-                description = f'You are not currently allowed to buy stocks in game #{game_id}.'
-        
-        elif exc.reason == 'Maximum picks reached':
-            title="Game Pick Limit Reached"
-            description = f'You have reached the maximum number of picks for this game.\nTo add another stock, you need to remove one of your current picks.'
-        
-        elif exc.reason == 'Past pick_date':
-            description = f'The pick date for this game has passed, so you can no longer pick stocks.'
-    
-    except AlreadyExistsError as exc:
-        description = f'You already own {ticker} in this game!'
-        
-    except DoesntExistError as exc: # Player isnt in the game at all
-        if exc.table == 'game_participants':
-            description = f'You are not in the game: {game_id}.'
-
-    except Exception as e: # Other unexpeted errors
-        logger.exception(f'User: {interaction.user.id} tried to buy the stock: {ticker} in game: {game_id}. Error: {e}')
-        description='An unexpected error occurred while trying to buy the stock. Please try again or contact a moderator.'
-            
     await interaction.followup.send(
-        embed=simple_embed( # This just creates the status message
-            status = status,
-            title = title,
-            desc = description
-            ), 
-        ephemeral=ephemeral_test
-        )
+        embed=simple_embed(status=status, title=title, desc=description),
+        ephemeral=ephemeral_test,
+    )
 
 
 # Selling is not implemented yet — keep the command commented for later use.

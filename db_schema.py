@@ -26,7 +26,7 @@ logger = logging.getLogger("DbSchema")
 # # (YYYY-MM-DD HH:MM:SS) objects should include 'datetime' in the key name
 # # (YYYY-MM-DD) objects should include 'date' in the key name
 
-db_ver = "0.2.5"  # Current schema version
+db_ver = "0.2.6"  # Current schema version
 
 # (from_version, to_version) -> migration function that mutates ``db_name`` in place.
 # When no entry matches a version jump, :func:`ensure_database` remakes empty.
@@ -173,11 +173,29 @@ def _migrate_0_2_4_to_0_2_5(db_name: str) -> None:
         logger.info("Repaired %s stock pick(s) with zero start_value", repaired)
 
 
+def _migrate_0_2_5_to_0_2_6(db_name: str) -> None:
+    """Add ``invalid_stocks`` cache for unknown tickers."""
+    conn = sqlite3.connect(db_name)
+    try:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS invalid_stocks (
+                ticker TEXT PRIMARY KEY,
+                expires_at TEXT NOT NULL,
+                datetime_created TEXT NOT NULL,
+                last_checked TEXT NOT NULL
+            );"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 MIGRATIONS: dict[tuple[str, str], MigrationFn] = {
     ("0.2.1", "0.2.2"): _migrate_0_2_1_to_0_2_2,
     ("0.2.2", "0.2.3"): _migrate_0_2_2_to_0_2_3,
     ("0.2.3", "0.2.4"): _migrate_0_2_3_to_0_2_4,
     ("0.2.4", "0.2.5"): _migrate_0_2_4_to_0_2_5,
+    ("0.2.5", "0.2.6"): _migrate_0_2_5_to_0_2_6,
 }
 
 
@@ -303,33 +321,54 @@ def ensure_database(db_name: str, *, target_version: str = db_ver) -> str:
             )
         return "unchanged"
 
-    migrator = MIGRATIONS.get((current or "", target_version))
-    if migrator is not None:
-        old_label = (current or "unknown").replace("/", "_")
-        new_label = target_version.replace("/", "_")
-        backup = create_db_backup(
-            db_name, kind="remake", label=f"{old_label}-to-{new_label}"
-        )
-        logger.info(
-            "Migrating database %s from %s → %s (backup: %s)",
-            db_name,
-            current,
-            target_version,
-            backup,
-        )
-        migrator(db_name)
-        create(db_name, upgrade=False)  # pick up any new CREATE IF NOT EXISTS tables
-        _set_db_version(db_name, target_version)
-        return "migrated"
+    old_label = (current or "unknown").replace("/", "_")
+    new_label = target_version.replace("/", "_")
+    backup = create_db_backup(
+        db_name, kind="remake", label=f"{old_label}-to-{new_label}"
+    )
+    logger.info(
+        "Migrating database %s from %s → %s (backup: %s)",
+        db_name,
+        current,
+        target_version,
+        backup,
+    )
 
-    remake_db_on_mismatch(db_name, target_version, force=True)
-    return "remade"
+    working = current or ""
+    while working != target_version:
+        migrator = MIGRATIONS.get((working, target_version))
+        if migrator is not None:
+            next_version = target_version
+        else:
+            hops = [
+                (to_v, fn)
+                for (from_v, to_v), fn in MIGRATIONS.items()
+                if from_v == working
+            ]
+            if len(hops) != 1:
+                logger.warning(
+                    "No migration path from %s to %s for %s; remaking empty schema",
+                    working,
+                    target_version,
+                    db_name,
+                )
+                remake_db_on_mismatch(db_name, target_version, force=True)
+                return "remade"
+            next_version, migrator = hops[0]
+
+        logger.info("Applying migration %s → %s on %s", working, next_version, db_name)
+        migrator(db_name)
+        working = next_version
+
+    create(db_name, upgrade=False)  # pick up any new CREATE IF NOT EXISTS tables
+    _set_db_version(db_name, target_version)
+    return "migrated"
 
 
 def create(db_name:str, upgrade:bool=True):
     """Create database schema tables.
 
-    Version: 0.2.5
+    Version: 0.2.6
 
     Args:
         db_name (str): Database name
@@ -337,6 +376,10 @@ def create(db_name:str, upgrade:bool=True):
             ``db_ver``, run :func:`ensure_database` (migrate or remake). Defaults to True.
 
     # Changelog
+
+    ## [0.2.6] - 2026-08-26
+    ### Added
+    - ``invalid_stocks`` table for short-lived negative ticker lookups
 
     ## [0.2.5] - 2026-08-24
     ### Fixed
@@ -588,6 +631,13 @@ def create(db_name:str, upgrade:bool=True):
         PRIMARY KEY (game_id, trade_date),
         FOREIGN KEY (game_id) REFERENCES games (game_id) ON DELETE CASCADE,
         FOREIGN KEY (first_user_id) REFERENCES users (user_id)
+        );""")
+
+    cursor.execute("""CREATE TABLE IF NOT EXISTS invalid_stocks (
+        ticker TEXT PRIMARY KEY,
+        expires_at TEXT NOT NULL,               -- ISO8601 (YYYY-MM-DD HH:MM:SS)
+        datetime_created TEXT NOT NULL,         -- ISO8601 (YYYY-MM-DD HH:MM:SS)
+        last_checked TEXT NOT NULL              -- ISO8601 (YYYY-MM-DD HH:MM:SS)
         );""")
 
     conn.commit()

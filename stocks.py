@@ -778,6 +778,47 @@ class Backend:
         if not updates:
             return
         self._update_single(table='stocks', id_column='stock_id', item_id=stock.id, **updates)
+
+    INVALID_TICKER_TTL_DAYS = 7
+
+    def is_ticker_invalid(self, ticker: str) -> bool:
+        """Return True when ``ticker`` is cached as invalid and still blocked."""
+        db_ticker = to_db_ticker(ticker)
+        resp = self.sql.get(table='invalid_stocks', filters={'ticker': db_ticker})
+        if resp.status != 'success':
+            return False
+        row = resp.result[0]
+        return str(row['expires_at']) > _iso8601()
+
+    def record_invalid_ticker(self, ticker: str) -> None:
+        """Cache a ticker as invalid for :data:`INVALID_TICKER_TTL_DAYS` days."""
+        db_ticker = to_db_ticker(ticker)
+        now = _iso8601()
+        expires_at = (
+            datetime.now() + timedelta(days=self.INVALID_TICKER_TTL_DAYS)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        resp = self.sql.get(table='invalid_stocks', filters={'ticker': db_ticker})
+        if resp.status == 'success':
+            self.sql.update(
+                table='invalid_stocks',
+                items={'expires_at': expires_at, 'last_checked': now},
+                filters={'ticker': db_ticker},
+            )
+            return
+        self.sql.insert(
+            table='invalid_stocks',
+            items={
+                'ticker': db_ticker,
+                'expires_at': expires_at,
+                'datetime_created': now,
+                'last_checked': now,
+            },
+        )
+
+    def clear_invalid_ticker(self, ticker: str) -> None:
+        """Remove a ticker from the invalid cache after a successful lookup."""
+        db_ticker = to_db_ticker(ticker)
+        self.sql.delete(table='invalid_stocks', filters={'ticker': db_ticker})
     
     def get_stock(self, ticker_or_id:str | int)-> dtv.Stock:
         """Get a stock
@@ -1859,9 +1900,9 @@ class GameLogic: # Might move some of the control/running actions here
     def find_stock(self, ticker:str) -> str: 
         """Find and add a US equity to the database via Alpaca market data.
 
-        Verifies the symbol the same way ``update_stock_prices`` does: ask the
-        IEX snapshot feed for a price. Does not use the trading ``/v2/assets``
-        API (often 401 with market-data-only keys).
+        Checks the local ``stocks`` table first, then a short-lived
+        ``invalid_stocks`` cache, and only then calls Alpaca. Unknown symbols
+        are cached as invalid for seven days; transient API failures are not.
 
         Args:
             ticker (str): Stock ticker.  Eg: 'MSFT' or 'BRK.B'.
@@ -1871,8 +1912,8 @@ class GameLogic: # Might move some of the control/running actions here
             
         Raises:
             ValueError: Unable to find stock
+            RuntimeError: Stock lookup temporarily unavailable
         """        
-        #TODO regex the subimissions to check for invalid characters and save time.
         db_ticker = to_db_ticker(ticker)
         alpaca_ticker = to_alpaca_symbol(ticker)
 
@@ -1884,16 +1925,17 @@ class GameLogic: # Might move some of the control/running actions here
             except LookupError:
                 pass
 
-        try:
-            prices = self.alpaca.get_latest_prices([db_ticker])
-        except Exception as e:
-            self.logger.exception('Alpaca price lookup failed for %s', db_ticker, exc_info=e)
-            raise ValueError("Unable to find stock") from e
-
-        price = prices.get(db_ticker)
-        if price is None:
+        if self.be.is_ticker_invalid(db_ticker):
             raise ValueError("Unable to find stock")
 
+        price, status = self.alpaca.lookup_equity_price(db_ticker)
+        if status == "unavailable":
+            raise RuntimeError("Stock lookup temporarily unavailable")
+        if status == "not_found" or price is None:
+            self.be.record_invalid_ticker(db_ticker)
+            raise ValueError("Unable to find stock")
+
+        self.be.clear_invalid_ticker(db_ticker)
         company_name = db_ticker
         exchange = "UNKNOWN"
         try:
