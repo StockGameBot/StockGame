@@ -240,6 +240,11 @@ def test_find_stock_returns_existing_and_adds_from_market_data(be, mocker):
     assert logic.find_stock("EXIST") == "EXIST"
 
     mocker.patch.object(logic.alpaca, "lookup_equity_price", return_value=(12.5, "found"))
+    mocker.patch.object(
+        logic.alpaca,
+        "get_us_equity",
+        return_value={"name": "New Company Inc.", "exchange": "NASDAQ", "status": "active", "tradable": True, "class": "us_equity"},
+    )
     mocker.patch("helpers.equity_meta.lookup_company_name", return_value="New Company Inc.")
     assert logic.find_stock("NEWCO") == "NEWCO"
     assert be.get_stock("NEWCO").company == "New Company Inc."
@@ -287,6 +292,11 @@ def test_find_stock_refreshes_expired_invalid_cache(be, mocker):
         filters={"ticker": "RETRY"},
     )
     mocker.patch.object(logic.alpaca, "lookup_equity_price", return_value=(10.0, "found"))
+    mocker.patch.object(
+        logic.alpaca,
+        "get_us_equity",
+        return_value={"name": "Retry Co", "exchange": "NASDAQ", "status": "active", "tradable": True, "class": "us_equity"},
+    )
     mocker.patch("helpers.equity_meta.lookup_company_name", return_value="Retry Co")
     assert logic.find_stock("RETRY") == "RETRY"
     assert not be.is_ticker_invalid("RETRY")

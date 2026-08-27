@@ -111,6 +111,63 @@ def test_buy_stock_rejects_delisted(fe, mocker):
         fe.buy_stock(user_id=owner_id, game_id=game_id, ticker="DEAD")
 
 
+def test_buy_stock_rejects_untradeable_on_alpaca(fe, mocker):
+    be = fe.be
+    be.add_stock("ZEUS", "nasdaq", "ZEUS")
+    owner_id = 10
+    game_id = be.add_game(owner_id, "G", "2026-01-01", starting_money=1000, total_picks=1)
+    be.add_participant(owner_id, game_id, force_active=True)
+    mocker.patch.object(fe.gl, "find_stock", return_value="ZEUS")
+    mocker.patch.object(fe.gl.alpaca, "get_us_equity", side_effect=ValueError("Stock is not tradeable"))
+    with pytest.raises(ValueError, match="not tradeable"):
+        fe.buy_stock(user_id=owner_id, game_id=game_id, ticker="ZEUS")
+
+
+def test_repair_untradeable_equity_removes_picks(be, mocker):
+    from helpers.repairs_0_2_8 import repair_untradeable_equity_picks
+
+    be.add_stock("ZEUS", "nasdaq", "ZEUS")
+    be.add_stock("MSFT", "nasdaq", "Microsoft")
+    zeus = be.get_stock("ZEUS")
+    msft = be.get_stock("MSFT")
+    be.add_user(1, "discord", "player")
+    game_id = be.add_game(1, "G", "2026-01-01", starting_money=1000, total_picks=3)
+    be.add_participant(1, game_id, force_active=True)
+    participant = be.get_many_participants(user_id=1, game_id=game_id)[0]
+    be.add_stock_pick(participant.id, zeus.id)
+    be.add_stock_pick(participant.id, msft.id)
+    zeus_picks = be.get_many_stock_picks(participant_id=participant.id, stock_id=zeus.id)
+    msft_picks = be.get_many_stock_picks(participant_id=participant.id, stock_id=msft.id)
+    be.update_stock_pick(pick_id=zeus_picks[0].id, status="owned", shares=10.0, current_value=500.0)
+    be.update_stock_pick(pick_id=msft_picks[0].id, status="owned", shares=5.0, current_value=500.0)
+
+    class FakeAlpaca:
+        configured = True
+
+        def fetch_buyable_db_tickers(self):
+            return {"MSFT"}
+
+    report = repair_untradeable_equity_picks(be, FakeAlpaca(), force=True)
+    assert report.picks_removed == 1
+    assert "ZEUS" in report.tickers
+    remaining = be.get_many_stock_picks(participant_id=participant.id)
+    assert len(remaining) == 1
+    assert remaining[0].stock_id == msft.id
+    assert be.get_stock("ZEUS").trade_status == "delisted"
+
+
+def test_repair_stress_test_end_date(be):
+    from helpers.repairs_0_2_8 import repair_stress_test_end_date
+
+    be.add_user(1, "discord", "owner")
+    game_id = be.add_game(1, "Official Stress Test Jul 2026", "2026-07-01", total_picks=1)
+    assert be.get_game(game_id).end_date is None
+
+    assert repair_stress_test_end_date(be, force=True) is True
+    assert str(be.get_game(game_id).end_date) == "2026-08-31"
+    assert repair_stress_test_end_date(be, force=True) is False
+
+
 def test_portfolio_event_badge_render():
     from helpers.views import StockPortfolioImageGenerator
     from PIL import Image, ImageDraw
