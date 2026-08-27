@@ -23,8 +23,6 @@ SQLite schema versions match `db_schema.db_ver`. **Beta** began with [PR #162](h
 - Split-price retry loop for post-open trades; portfolio red event badges for CA labels
 - Market-aligned update schedule (9:15 pre-open through 16:15 post-close, 15-min grid)
 - One-time IMCC 2026-08-27 reverse-split repair on bot startup
-- Untradeable/inactive equity repair: removes dead picks and marks `trade_status = delisted` (falls back to stale IEX trades when trading API keys return 401)
-- One-time 0.2.8 startup repairs (`helpers/repairs_0_2_8.py`): untradeable pick cleanup + stress test game end date **2026-08-31**
 
 ### Changed
 
