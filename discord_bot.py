@@ -109,7 +109,7 @@ def has_permission(user: discord.Member) -> bool:
     """
     if user.guild_permissions.administrator:
         return True
-    # Legacy role fallback — not the main reliance; Integrations should gate access.
+    # Legacy role fallback - not the main reliance; Integrations should gate access.
     return any(role.id == dev_role_id for role in user.roles)
     
 
@@ -535,7 +535,7 @@ async def create_game_advanced(
         pick_note = (
             f"Pick deadline: `{pick_date}`"
             if pick_date
-            else "Pick deadline: none — players can buy anytime"
+            else "Pick deadline: none - players can buy anytime"
         )
         embed = discord.Embed(
             title="Game Created Successfully",
@@ -1099,7 +1099,7 @@ async def create_game(interaction: discord.Interaction):
                         if game_exclusive_picks
                         else "Pick deadline (blank = buy anytime)"
                     ),
-                    placeholder="YYYY-MM-DD — leave blank to allow buying anytime",
+                    placeholder="YYYY-MM-DD - leave blank to allow buying anytime",
                     required=game_exclusive_picks,
                     max_length=10,
                     min_length=10 if game_exclusive_picks else 0,
@@ -1127,7 +1127,7 @@ async def create_game(interaction: discord.Interaction):
                             "Owner `/invite`s join private games immediately (no approval).\n\n"
                             "If you select 'No', it will be visible publicly.\n\n"
                             "⚠️ **DM tip:** `/invite` delivers join buttons by DM. If the invited user has "
-                            "DMs from server members turned off, private invites may not work — ask them to "
+                            "DMs from server members turned off, private invites may not work - ask them to "
                             "enable DMs, or share the game ID privately."
                         ),
                         color=discord.Color.blue()
@@ -1203,7 +1203,7 @@ async def create_game(interaction: discord.Interaction):
                         game_start_date = start_date_input.value
                         game_end_date = end_date_input.value or None
                         game_pick_date = pick_date_input.value or None
-                        pick_deadline_text = game_pick_date or "None — players can buy anytime"
+                        pick_deadline_text = game_pick_date or "None - players can buy anytime"
                         confirmation_embed = discord.Embed(
                             title="Game Creation Confirmation",
                             description=(
@@ -1490,7 +1490,7 @@ async def create_recurring_game(
                     pick_date_text = "On each game start date"
                 embed.add_field(name="📝 Pick Deadline", value=pick_date_text, inline=True)
             else:
-                embed.add_field(name="📝 Pick Deadline", value="None — buy anytime", inline=True)
+                embed.add_field(name="📝 Pick Deadline", value="None - buy anytime", inline=True)
             
             embed.add_field(name="🎯 Exclusive Picks", value="Yes" if exclusive_picks else "No", inline=True)
             embed.add_field(name="🏷️ Updates", value="alpaca", inline=True)
@@ -1531,7 +1531,7 @@ async def create_recurring_game(
         except AlreadyExistsError:
             await interaction.followup.send(
                 f"❌ A recurring template named **{name}** already exists. "
-                "Choose a different name — press the **↑ up arrow** to bring back your previous command and edit it.",
+                "Choose a different name - press the **↑ up arrow** to bring back your previous command and edit it.",
                 ephemeral=ephemeral_test,
             )
         except InvalidDateFormatError:
@@ -2144,7 +2144,7 @@ class RecurringTemplateManager(discord.ui.View):
 
     def _pick_deadline_text(self, template) -> str:
         if template.pick_date is None:
-            return "None — buy anytime"
+            return "None - buy anytime"
         if template.pick_date > 0:
             return f"{template.pick_date} days before each game start"
         if template.pick_date < 0:
@@ -2167,9 +2167,9 @@ class RecurringTemplateManager(discord.ui.View):
             description=(
                 f"Template **{self.index + 1}** of **{len(self.templates)}**\n"
                 f"**Status:** {status_label}\n\n"
-                "**Stop** — do not create future games; games already created keep running until they end.\n"
-                "**Resume** — start creating future games again on the normal schedule.\n"
-                "**Delete** — remove this template from the database (existing games stay)."
+                "**Stop** - do not create future games; games already created keep running until they end.\n"
+                "**Resume** - start creating future games again on the normal schedule.\n"
+                "**Delete** - remove this template from the database (existing games stay)."
             ),
             color=discord.Color.blue() if template.status == "enabled" else discord.Color.dark_grey(),
         )
@@ -2203,7 +2203,7 @@ class RecurringTemplateManager(discord.ui.View):
             description=(
                 f"Permanently delete recurring template **{template.name}**?\n\n"
                 "Existing games created from it will keep running, but no new games will be created.\n"
-                "Confirm or Cancel — either way you will move to the next template."
+                "Confirm or Cancel - either way you will move to the next template."
             ),
             color=discord.Color.red(),
         )
@@ -2784,7 +2784,7 @@ async def buy_stock(
     )
 
 
-# Selling is not implemented yet — keep the command commented for later use.
+# Selling is not implemented yet - keep the command commented for later use.
 # @bot.tree.command(name="sell-stock", description="Sell an owned stock or cancel a pending buy")
 # @app_commands.autocomplete(game_id=ac.all_games_autocomplete, ticker=ac.sell_ticker_autocomplete)
 # @app_commands.describe(game_id="ID of the game", ticker="Stock ticker symbol")
@@ -3515,7 +3515,7 @@ def _game_info_embed(
         pending = fe.count_pending_participants(game.id)
         if pending > 0:
             label = 'user' if pending == 1 else 'users'
-            pending_line = f"\nPending join requests: **{pending}** {label} — `/manage-pending`"
+            pending_line = f"\nPending join requests: **{pending}** {label} - `/manage-pending`"
     embed = discord.Embed(
         title=f"{game.name} ({game.id})",
         color=discord.Color.blurple(),
@@ -3908,7 +3908,7 @@ async def my_stocks(
             f"{picks_label}: **{remaining}** / {game.pick_count} "
             f"(${float(game.start_money) / int(game.pick_count):,.2f} per pick)"
         )
-        title = game.name if not viewing_other else f"{game.name} — {subject_name}"
+        title = game.name if not viewing_other else f"{game.name} - {subject_name}"
         embed = discord.Embed(
             title=title,
             description=f"{notice}\n\n{body}" if notice else body,
@@ -3971,7 +3971,7 @@ async def my_stocks(
                     f'**Picks remaining:** {remaining} of {total}\n'
                     f'**Allocated per pick:** ${float(game.start_money) / total:,.2f}'
                 )
-                title = f'No Stocks Yet — {subject_name}'
+                title = f'No Stocks Yet - {subject_name}'
             else:
                 body = (
                     f'You have not bought any stocks in game #{game_id}. '
@@ -4085,7 +4085,7 @@ def _pending_join_notice(game, viewer_user_id: int | None) -> str:
     if pending <= 0:
         return ''
     label = 'approval' if pending == 1 else 'approvals'
-    return f'\n> **Pending {label}:** **{pending}** — use `/manage-pending`'
+    return f'\n> **Pending {label}:** **{pending}** - use `/manage-pending`'
 
 
 def _format_listed_game(
@@ -4312,7 +4312,7 @@ async def logs(
 
 def _quick_start_help_embed() -> discord.Embed:
     embed = discord.Embed(
-        title="Stock Game Bot — Quick Start",
+        title="Stock Game Bot - Quick Start",
         description=(
             "New here? You only need four commands to start playing. "
             "Use **Advanced** below whenever you want the full command guide."
@@ -4356,37 +4356,37 @@ def _regular_help_embed(
     moderator: bool = False,
 ) -> discord.Embed:
     embed = discord.Embed(
-        title="Stock Game Bot — Command Guide",
+        title="Stock Game Bot - Command Guide",
         description="Commands are grouped by what you want to do.",
         color=discord.Color.green(),
     )
     embed.add_field(
         name="Find and join games",
         value=(
-            "`/game-list` — Browse public games and recurring competitions.\n"
-            "`/game-info` — View a game's rules, dates, settings, and leaderboard.\n"
-            "`/join-game` — Join a public game or request access to a private one.\n"
-            "`/my-games` — List every game you currently or previously played.\n"
-            "`/leave-game` — Leave one of your games."
+            "`/game-list` - Browse public games and recurring competitions.\n"
+            "`/game-info` - View a game's rules, dates, settings, and leaderboard.\n"
+            "`/join-game` - Join a public game or request access to a private one.\n"
+            "`/my-games` - List every game you currently or previously played.\n"
+            "`/leave-game` - Leave one of your games."
         ),
         inline=False,
     )
     embed.add_field(
         name="Play and track results",
         value=(
-            "`/buy-stock` — Add a stock pick to one of your games.\n"
-            "`/remove-stock` — Cancel a purchase that is still pending.\n"
-            "`/my-stocks` — View your portfolio, performance, and current rank.\n"
-            "`/leaderboard` — Browse rankings for your games or accessible games.\n"
-            "`/user-stats` — View your or another player's overall statistics."
+            "`/buy-stock` - Add a stock pick to one of your games.\n"
+            "`/remove-stock` - Cancel a purchase that is still pending.\n"
+            "`/my-stocks` - View your portfolio, performance, and current rank.\n"
+            "`/leaderboard` - Browse rankings for your games or accessible games.\n"
+            "`/user-stats` - View your or another player's overall statistics."
         ),
         inline=False,
     )
     embed.add_field(
         name="Create games",
         value=(
-            "`/create-game` — Build a game with a guided setup.\n"
-            "`/create-game-advanced` — Create a game by entering every setting directly."
+            "`/create-game` - Build a game with a guided setup.\n"
+            "`/create-game-advanced` - Create a game by entering every setting directly."
         ),
         inline=False,
     )
@@ -4394,9 +4394,9 @@ def _regular_help_embed(
         embed.add_field(
             name="Game owner commands",
             value=(
-                "`/invite` — Invite someone to your game through Discord.\n"
-                "`/manage-game` — Change settings on an existing game you own.\n"
-                "`/delete-game` — Permanently delete a game you own."
+                "`/invite` - Invite someone to your game through Discord.\n"
+                "`/manage-game` - Change settings on an existing game you own.\n"
+                "`/delete-game` - Permanently delete a game you own."
             ),
             inline=False,
         )
@@ -4404,8 +4404,8 @@ def _regular_help_embed(
         embed.add_field(
             name="Private game commands",
             value=(
-                "`/manage-pending` — Approve or deny requests to join a private game.\n"
-                "`/kick-player` — Remove a player from your private game."
+                "`/manage-pending` - Approve or deny requests to join a private game.\n"
+                "`/kick-player` - Remove a player from your private game."
             ),
             inline=False,
         )
@@ -4413,18 +4413,18 @@ def _regular_help_embed(
         embed.add_field(
             name="Moderator tools",
             value=(
-                "`/create-recurring-game` — Schedule a repeating competition and optional leaderboard push.\n"
-                "`/manage-recurring-games` — Pause, resume, delete, or configure recurring games.\n"
-                "`/update` — Force an immediate price, portfolio, and leaderboard update.\n"
-                "`/logs` — Download bot logs for troubleshooting."
+                "`/create-recurring-game` - Schedule a repeating competition and optional leaderboard push.\n"
+                "`/manage-recurring-games` - Pause, resume, delete, or configure recurring games.\n"
+                "`/update` - Force an immediate price, portfolio, and leaderboard update.\n"
+                "`/logs` - Download bot logs for troubleshooting."
             ),
             inline=False,
         )
     embed.add_field(
         name="More information",
         value=(
-            "`/about` — Learn about StockBot and its creators.\n"
-            "`/help` — Open this guide again."
+            "`/about` - Learn about StockBot and its creators.\n"
+            "`/help` - Open this guide again."
         ),
         inline=False,
     )
