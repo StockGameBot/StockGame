@@ -413,25 +413,66 @@ def _store_leaderboard_cache(cache_key: str, data: bytes, fingerprint: str) -> N
         _leaderboard_image_cache.pop(key, None)
 
 
-async def _run_update_and_push(*, force: bool = False) -> None:
+async def _run_update_and_push(
+    *,
+    force: bool = False,
+    kind: str | None = None,
+    apply_corporate_actions: bool = False,
+) -> None:
     """Run GameLogic.update_all off-loop, then push recurring leaderboards on Discord."""
-    if force:
-        await asyncio.to_thread(fe.gl.update_all, None, True)
-    else:
-        await asyncio.to_thread(fe.gl.update_all)
+    await asyncio.to_thread(
+        fe.gl.update_all,
+        None,
+        force,
+        kind=kind,
+        apply_corporate_actions=apply_corporate_actions,
+    )
     await push_all_recurring_leaderboards(bot, fe, name_resolver=resolve_player_name)
     await sync_recurring_top_roles(bot, fe)
 
 
-@tasks.loop(minutes=15)
+@tasks.loop(time=__import__('datetime').time(9, 0, tzinfo=__import__('helpers.market_schedule', fromlist=['NY_TZ']).NY_TZ))
+async def scheduled_ca_staging():
+    """Stage corporate actions 30 minutes before market open (weekdays)."""
+    from helpers import corporate_actions as ca
+    from helpers.market_schedule import is_weekday_et
+
+    if not is_weekday_et():
+        return
+    try:
+        await asyncio.to_thread(
+            ca.stage_corporate_actions,
+            fe.be,
+            fe.gl.alpaca,
+            fe.gl._today_et(),
+        )
+    except Exception:
+        logger.exception('Scheduled CA staging failed.')
+
+
+@tasks.loop(time=__import__('helpers.market_schedule', fromlist=['market_update_times']).market_update_times())
 async def scheduled_game_update():
-    """Refresh prices (Alpaca) and game portfolios every 15 minutes without blocking Discord."""
+    """Refresh prices and portfolios on the market-aligned ET schedule."""
+    from helpers.market_schedule import (
+        is_weekday_et,
+        should_apply_corporate_actions,
+        update_kind_for_time,
+    )
+
+    if not is_weekday_et():
+        return
     if _game_update_lock.locked():
         logger.debug('Skipping scheduled update; previous cycle still running.')
         return
+    kind = update_kind_for_time()
+    apply_ca = should_apply_corporate_actions()
     async with _game_update_lock:
         try:
-            await _run_update_and_push(force=False)
+            await _run_update_and_push(
+                force=False,
+                kind=kind,
+                apply_corporate_actions=apply_ca,
+            )
         except Exception:
             logger.exception('Scheduled game update failed.')
 
@@ -478,6 +519,14 @@ async def on_ready():
         logger.exception('Failed to register bot user for recurring-game ownership')
     if not scheduled_game_update.is_running():
         scheduled_game_update.start()
+    if not scheduled_ca_staging.is_running():
+        scheduled_ca_staging.start()
+    # IMCC one-time repair if applicable
+    try:
+        from helpers import corporate_actions as ca
+        await asyncio.to_thread(ca.repair_imcc_2026_08_27, fe.be, fe.gl.alpaca)
+    except Exception:
+        logger.exception('IMCC split repair skipped due to error')
     # Keep the equity universe current without delaying command sync.
     asyncio.create_task(_seed_sp500_on_startup())
     try:
@@ -2626,6 +2675,8 @@ def _buy_stock_outcome(
     except ValueError as exc:
         if "Invalid Ticker, too long!" in str(exc):
             description = f"The ticker {ticker} is not valid!"
+        elif "Stock was delisted and can no longer be purchased." in str(exc):
+            description = f"The ticker {ticker} was delisted and can no longer be purchased."
         elif "Stock is not tradeable" in str(exc):
             description = (
                 f"The ticker {ticker} is not tradeable. "
@@ -3768,6 +3819,7 @@ def _build_my_stocks_portfolio(user_id: int, game_id: str, display_name: str):
             'change_dollars': pick.change_dollars,
             'change_percent': pick.change_percent,
             'last_updated': pick.last_updated,
+            'event_label': getattr(pick, 'event_label', None),
         }
         for pick in picks
     ]

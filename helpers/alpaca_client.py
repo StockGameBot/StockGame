@@ -5,17 +5,28 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import date, datetime
 from typing import Any, Literal, Optional
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import requests
+
+from helpers.market_schedule import market_open_datetime
 
 logger = logging.getLogger("AlpacaMarketData")
 
 DATA_BASE = "https://data.alpaca.markets/v2"
+CORP_ACTIONS_BASE = "https://data.alpaca.markets/v1"
 DEFAULT_TRADING_BASE = "https://paper-api.alpaca.markets"
-BATCH_SIZE = 100
+BATCH_SIZE = 500
 SLEEP_BETWEEN_BATCHES = 0.35  # ~170 req/min max, under free-tier 200/min
+SPLIT_PRICE_MAX_ATTEMPTS = 5
+
+CRITICAL_CA_TYPES = (
+    "reverse_split,forward_split,name_change,worthless_removal,"
+    "cash_merger,stock_merger,stock_and_cash_merger"
+)
 
 
 def to_alpaca_symbol(ticker: str) -> str:
@@ -43,6 +54,37 @@ def price_from_snapshot(snap: dict[str, Any]) -> Optional[float]:
     bar = snap.get("dailyBar") or snap.get("prevDailyBar") or {}
     if bar.get("c") is not None:
         return float(bar["c"])
+    return None
+
+
+def trade_timestamp_from_snapshot(snap: dict[str, Any]) -> Optional[datetime]:
+    """Parse ``latestTrade.t`` from an Alpaca snapshot (UTC-aware)."""
+    trade = snap.get("latestTrade") or {}
+    raw = trade.get("t")
+    if raw is None:
+        return None
+    ts = float(raw)
+    if ts > 1e12:
+        ts /= 1000.0
+    return datetime.fromtimestamp(ts, tz=ZoneInfo("UTC"))
+
+
+def is_post_open_trade(snap: dict[str, Any], trade_date: date) -> bool:
+    """True when ``latestTrade`` is at or after 9:30 ET on ``trade_date``."""
+    ts = trade_timestamp_from_snapshot(snap)
+    if ts is None:
+        return False
+    open_dt = market_open_datetime(trade_date)
+    return ts.astimezone(open_dt.tzinfo) >= open_dt
+
+
+def price_from_post_open_trade(snap: dict[str, Any], trade_date: date) -> Optional[float]:
+    """Price from ``latestTrade`` only if the trade is post-open on ``trade_date``."""
+    if not is_post_open_trade(snap, trade_date):
+        return None
+    trade = snap.get("latestTrade") or {}
+    if trade.get("p") is not None:
+        return float(trade["p"])
     return None
 
 
@@ -172,7 +214,82 @@ class AlpacaMarketData:
             return None, "not_found"
         return price, "found"
 
-    def get_latest_prices(self, tickers: list[str]) -> dict[str, float]:
+    def fetch_corporate_actions_page(
+        self,
+        *,
+        start: str,
+        end: str,
+        types: str = CRITICAL_CA_TYPES,
+        data_quality: str = "complete",
+        limit: int = 1000,
+        page_token: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Fetch one page of corporate actions (date-scoped, no symbols filter)."""
+        self._require_configured()
+        params: dict[str, Any] = {
+            "types": types,
+            "start": start,
+            "end": end,
+            "limit": limit,
+            "data_quality": data_quality,
+        }
+        if page_token:
+            params["page_token"] = page_token
+        r = self._get(f"{CORP_ACTIONS_BASE}/corporate-actions", params=params)
+        r.raise_for_status()
+        data = r.json()
+        return data if isinstance(data, dict) else {}
+
+    def fetch_corporate_actions_for_date(
+        self,
+        trade_date: date,
+        *,
+        types: str = CRITICAL_CA_TYPES,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Return merged ``corporate_actions`` lists for ``trade_date`` (paginated)."""
+        self._require_configured()
+        date_str = trade_date.isoformat()
+        merged: dict[str, list[dict[str, Any]]] = {}
+        page_token: Optional[str] = None
+        while True:
+            data = self.fetch_corporate_actions_page(
+                start=date_str,
+                end=date_str,
+                types=types,
+                page_token=page_token,
+            )
+            ca = data.get("corporate_actions")
+            if isinstance(ca, dict):
+                for key, value in ca.items():
+                    if isinstance(value, list):
+                        merged.setdefault(key, []).extend(value)
+            page_token = data.get("next_page_token")
+            if not page_token:
+                break
+            time.sleep(SLEEP_BETWEEN_BATCHES)
+        return merged
+
+    def _price_from_snapshot_for_ticker(
+        self,
+        snap: Optional[dict[str, Any]],
+        db_ticker: str,
+        *,
+        split_tickers: set[str],
+        trade_date: Optional[date],
+    ) -> Optional[float]:
+        if not isinstance(snap, dict):
+            return None
+        if trade_date and db_ticker.upper() in split_tickers:
+            return price_from_post_open_trade(snap, trade_date)
+        return price_from_snapshot(snap)
+
+    def get_latest_prices(
+        self,
+        tickers: list[str],
+        *,
+        split_tickers: Optional[set[str]] = None,
+        trade_date: Optional[date] = None,
+    ) -> dict[str, float]:
         """
         Return {db_ticker: price} for every requested ticker that Alpaca can price.
 
@@ -184,6 +301,8 @@ class AlpacaMarketData:
         if not tickers:
             return {}
 
+        split_set = {to_db_ticker(t) for t in (split_tickers or set())}
+
         # Preserve original DB ticker spelling while querying Alpaca form.
         alpaca_to_db: dict[str, str] = {}
         ordered_alpaca: list[str] = []
@@ -191,46 +310,105 @@ class AlpacaMarketData:
             alpaca = to_alpaca_symbol(ticker)
             if alpaca in alpaca_to_db:
                 continue
-            alpaca_to_db[alpaca] = ticker
+            alpaca_to_db[alpaca] = to_db_ticker(ticker)
             ordered_alpaca.append(alpaca)
 
         prices: dict[str, float] = {}
-        unresolved: list[str] = []
+        snapshot_cache: dict[str, dict[str, Any]] = {}
 
+        def _ingest_batch(data: Optional[dict[str, Any]], batch: list[str]) -> list[str]:
+            unresolved: list[str] = []
+            if data is None:
+                return batch
+            for alpaca_sym in batch:
+                snap = data.get(alpaca_sym)
+                if isinstance(snap, dict):
+                    snapshot_cache[alpaca_sym] = snap
+                db_t = alpaca_to_db[alpaca_sym]
+                price = self._price_from_snapshot_for_ticker(
+                    snap if isinstance(snap, dict) else None,
+                    db_t,
+                    split_tickers=split_set,
+                    trade_date=trade_date,
+                )
+                if price is None:
+                    unresolved.append(alpaca_sym)
+                else:
+                    prices[db_t] = price
+            return unresolved
+
+        unresolved: list[str] = []
         for i in range(0, len(ordered_alpaca), BATCH_SIZE):
             batch = ordered_alpaca[i : i + BATCH_SIZE]
             data = self._fetch_snapshots_with_retries(batch, attempts=3)
-            if data is None:
-                unresolved.extend(batch)
-            else:
-                for alpaca_sym in batch:
-                    snap = data.get(alpaca_sym)
-                    price = price_from_snapshot(snap) if isinstance(snap, dict) else None
-                    if price is None:
-                        unresolved.append(alpaca_sym)
-                    else:
-                        prices[alpaca_to_db[alpaca_sym]] = price
-
+            unresolved.extend(_ingest_batch(data, batch))
             if i + BATCH_SIZE < len(ordered_alpaca):
                 time.sleep(SLEEP_BETWEEN_BATCHES)
 
-        # Second pass: never leave a ticker unchecked after a batch miss/failure.
         still_missing: list[str] = []
         for alpaca_sym in unresolved:
             if alpaca_to_db[alpaca_sym] in prices:
                 continue
             data = self._fetch_snapshots_with_retries([alpaca_sym], attempts=3)
-            if data is None:
+            missing = _ingest_batch(data, [alpaca_sym])
+            if missing:
                 still_missing.append(alpaca_sym)
-                continue
-            snap = data.get(alpaca_sym)
-            price = price_from_snapshot(snap) if isinstance(snap, dict) else None
-            if price is None:
-                still_missing.append(alpaca_sym)
-            else:
-                prices[alpaca_to_db[alpaca_sym]] = price
             time.sleep(SLEEP_BETWEEN_BATCHES)
 
+        # Retry split tickers until post-open trade or max attempts.
+        if split_set and trade_date:
+            retry_db = [
+                alpaca_to_db[s]
+                for s in still_missing
+                if alpaca_to_db.get(s) in split_set
+            ]
+            retry_db.extend(
+                db_t
+                for db_t in split_set
+                if db_t in {alpaca_to_db[s] for s in ordered_alpaca}
+                and db_t not in prices
+            )
+            retry_db = list(dict.fromkeys(retry_db))
+            attempt = 0
+            while retry_db and attempt < SPLIT_PRICE_MAX_ATTEMPTS:
+                attempt += 1
+                retry_alpaca = [to_alpaca_symbol(t) for t in retry_db]
+                data = self._fetch_snapshots_with_retries(retry_alpaca, attempts=2)
+                next_retry: list[str] = []
+                if data:
+                    for db_t in retry_db:
+                        alpaca_sym = to_alpaca_symbol(db_t)
+                        snap = data.get(alpaca_sym)
+                        if isinstance(snap, dict):
+                            snapshot_cache[alpaca_sym] = snap
+                        price = self._price_from_snapshot_for_ticker(
+                            snap if isinstance(snap, dict) else None,
+                            db_t,
+                            split_tickers=split_set,
+                            trade_date=trade_date,
+                        )
+                        if price is None:
+                            next_retry.append(db_t)
+                        else:
+                            prices[db_t] = price
+                            logger.info(
+                                "Post-open split price for %s after retry %s: %s",
+                                db_t,
+                                attempt,
+                                price,
+                            )
+                else:
+                    next_retry = retry_db
+                retry_db = next_retry
+                if retry_db:
+                    time.sleep(SLEEP_BETWEEN_BATCHES * attempt)
+            for db_t in retry_db:
+                if db_t not in prices and db_t not in [alpaca_to_db[s] for s in still_missing]:
+                    still_missing.append(to_alpaca_symbol(db_t))
+
+        still_missing = [
+            s for s in still_missing if alpaca_to_db.get(s) not in prices
+        ]
         if still_missing:
             missing_db = [alpaca_to_db[s] for s in still_missing]
             logger.error(

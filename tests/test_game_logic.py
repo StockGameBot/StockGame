@@ -14,7 +14,9 @@ def test_update_all_forwards_target_and_force(be, mocker):
     logic.update_all(game_id=game_id, force=True)
 
     update_statuses.assert_called_once_with(game_id=game_id)
-    update_prices.assert_called_once_with(game_id=game_id, force=True)
+    update_prices.assert_called_once_with(
+        game_id=game_id, force=True, kind=None, split_tickers=set()
+    )
     update_picks.assert_called_once_with(game_id=game_id, force=True)
     update_totals.assert_called_once_with(game_id=game_id)
 
