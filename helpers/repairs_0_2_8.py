@@ -162,16 +162,48 @@ def _repair_via_stale_iex_trades(
     game_id: Optional[str | int] = None,
 ) -> None:
     """Fallback when trading API keys cannot list assets (market-data-only keys)."""
+    from datetime import datetime, timezone
+
+    from helpers.alpaca_client import (
+        BATCH_SIZE,
+        to_alpaca_symbol,
+        to_db_ticker,
+        trade_timestamp_from_snapshot,
+    )
+
     logger.warning(
         "Using stale IEX trade fallback (>%s days) for %s held ticker(s)",
         STALE_IEX_TRADE_DAYS,
         len(stocks),
     )
+    if not stocks:
+        return
+
+    now = datetime.now(timezone.utc)
+    stale_db: set[str] = set()
+    alpaca_symbols = [to_alpaca_symbol(str(s.ticker)) for s in stocks]
+    db_by_alpaca = {to_alpaca_symbol(str(s.ticker)): to_db_ticker(str(s.ticker)).upper() for s in stocks}
+
+    for i in range(0, len(alpaca_symbols), BATCH_SIZE):
+        batch = alpaca_symbols[i : i + BATCH_SIZE]
+        try:
+            data = alpaca.fetch_snapshots(batch)
+        except Exception:
+            logger.exception("Snapshot batch failed during stale IEX repair")
+            continue
+        for alpaca_sym in batch:
+            db_t = db_by_alpaca.get(alpaca_sym, to_db_ticker(alpaca_sym).upper())
+            snap = data.get(alpaca_sym) if isinstance(data, dict) else None
+            ts = trade_timestamp_from_snapshot(snap) if isinstance(snap, dict) else None
+            if ts is None:
+                stale_db.add(db_t)
+                continue
+            age_days = (now - ts.astimezone(timezone.utc)).total_seconds() / 86400.0
+            if age_days > STALE_IEX_TRADE_DAYS:
+                stale_db.add(db_t)
+
     for stock in stocks:
-        if not alpaca.is_stale_iex_trade(
-            str(stock.ticker),
-            max_age_days=STALE_IEX_TRADE_DAYS,
-        ):
+        if str(stock.ticker).upper() not in stale_db:
             continue
         _mark_delisted_and_remove_picks(
             be,
