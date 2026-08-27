@@ -65,7 +65,7 @@ def test_buy_ticker_autocomplete_prefers_db_label_for_known_ticker():
     choices = asyncio.run(autocomplete.buy_ticker_autocomplete(SimpleNamespace(), "msft"))
 
     assert [(c.name, c.value) for c in choices] == [
-        ("MSFT — Microsoft Corporation", "MSFT"),
+        ("MSFT - Microsoft Corporation", "MSFT"),
     ]
 
 

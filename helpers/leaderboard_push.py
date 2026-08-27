@@ -113,14 +113,14 @@ def build_push_embed(
         company = best_pick.get("company_name") or best_pick.get("company") or best_pick["ticker"]
         embed.add_field(
             name="Best owned pick",
-            value=f"{best_pick['ticker']} — {company} {best_pick['pct']:+.2f}%",
+            value=f"{best_pick['ticker']} - {company} {best_pick['pct']:+.2f}%",
             inline=False,
         )
     if worst_pick:
         company = worst_pick.get("company_name") or worst_pick.get("company") or worst_pick["ticker"]
         embed.add_field(
             name="Worst owned pick",
-            value=f"{worst_pick['ticker']} — {company} {worst_pick['pct']:+.2f}%",
+            value=f"{worst_pick['ticker']} - {company} {worst_pick['pct']:+.2f}%",
             inline=False,
         )
     embed.set_footer(text=footer)

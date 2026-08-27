@@ -839,7 +839,7 @@ class Backend:
             resp = self.sql.get(table='stocks', filters=filters)
             return self._single_get(model=dtv.Stock, resp=resp)
 
-        # Accept BRK.B / BRK-B / mixed case — DB may store either class-share form.
+        # Accept BRK.B / BRK-B / mixed case - DB may store either class-share form.
         raw = str(ticker_or_id).strip().upper()
         candidates = list(dict.fromkeys([raw, to_db_ticker(raw), to_alpaca_symbol(raw)]))
         last_error: Optional[LookupError] = None
@@ -1486,7 +1486,7 @@ class GameLogic: # Might move some of the control/running actions here
         The first occurrence is ``anchor``. Later ones are
         ``anchor + n * recurring_period`` months. Adding months from the
         original anchor (not the previous occurrence) keeps the intended
-        day-of-month when possible — e.g. the 30th each month, clamped to
+        day-of-month when possible - e.g. the 30th each month, clamped to
         Feb 28/29, then back to the 30th in March.
         """
         if after is None:
@@ -1684,7 +1684,7 @@ class GameLogic: # Might move some of the control/running actions here
                 blob = f'{e} {reason}'.upper()
                 if 'UNIQUE' in blob or 'CONSTRAINT' in blob:
                     self.logger.debug('Price already stored for %s at %s', ticker, price_dt)
-                    updated += 1  # already present this minute — not a drop
+                    updated += 1  # already present this minute - not a drop
                 else:
                     write_failures.append(ticker)
                     self.logger.exception('Failed to update price for %s', ticker, exc_info=e)
@@ -2724,10 +2724,10 @@ class Frontend: # This will be where a bot (like discord) interacts
             game = self.be.get_game(game_id=game_id)
             if not game.allow_selling:
                 raise bexc.NotAllowedError(action='sell_stock', reason='Selling disabled', message='Cannot sell owned stocks in this game')
-            # Mark for sale — price accounting handled by update_stock_picks
+            # Mark for sale - price accounting handled by update_stock_picks
             self.be.update_stock_pick(pick_id=pick.id, status='pending_sell')
             return 'sell_requested'
-        else:  # pending_sell — already requested, nothing to do
+        else:  # pending_sell - already requested, nothing to do
             return 'already_pending'
     
     def remove_pick(self, user_id:int, game_id:int | str, ticker:str): # Remove a stock pick

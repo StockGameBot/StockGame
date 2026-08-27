@@ -903,7 +903,7 @@ class FinalStandingsPodiumGenerator:
             players.append(
                 {
                     "rank": len(players) + 1,
-                    "display_name": "—",
+                    "display_name": "-",
                     "current_value": 0,
                     "change_percent": 0,
                     "picks": [],

@@ -100,7 +100,7 @@ def test_regular_help_appends_owner_private_and_moderator_sections():
         "/logs",
     ):
         assert command in content
-    assert all(" — " in line for line in content.splitlines())
+    assert all(" - " in line for line in content.splitlines())
 
 
 def test_advanced_button_replaces_quick_start_with_regular_help():
@@ -126,7 +126,7 @@ def test_advanced_button_replaces_quick_start_with_regular_help():
         await button.callback(interaction)
 
         kwargs = interaction.response.edit_message.await_args.kwargs
-        assert kwargs["embed"].title == "Stock Game Bot — Command Guide"
+        assert kwargs["embed"].title == "Stock Game Bot - Command Guide"
         assert "/manage-game" in "\n".join(
             str(field.value) for field in kwargs["embed"].fields
         )

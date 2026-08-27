@@ -133,8 +133,8 @@ def test_build_push_embed_uses_signed_dollars_and_stacked_picks():
     assert "+$100.00" in embed.description
     assert "The Atrioc Hedge Fund" not in (embed.description or "")
     fields = {field.name: field.value for field in embed.fields}
-    assert "AXON — Axon Enterprise +5.50%" in fields["Best owned pick"]
-    assert "MMM — 3M Company -2.00%" in fields["Worst owned pick"]
+    assert "AXON - Axon Enterprise +5.50%" in fields["Best owned pick"]
+    assert "MMM - 3M Company -2.00%" in fields["Worst owned pick"]
     assert "`" not in fields["Best owned pick"]
 
 
