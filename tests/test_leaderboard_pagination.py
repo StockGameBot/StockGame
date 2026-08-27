@@ -37,6 +37,10 @@ def _buttons(view) -> dict[str, discord.ui.Button]:
     }
 
 
+def _page_button_labels() -> tuple[str, ...]:
+    return ("First page", "Previous page", "Next page", "Last page")
+
+
 def test_leaderboard_view_pages_ranks_and_games():
     import discord_bot as db
 
@@ -63,24 +67,39 @@ def test_leaderboard_view_pages_ranks_and_games():
 
         buttons = _buttons(view)
         assert list(buttons) == [
+            *_page_button_labels(),
             "Previous game",
-            "Previous page",
-            "Next page",
             "Next game",
             "Share",
         ]
+        assert buttons["First page"].disabled
         assert buttons["Previous game"].disabled
         assert buttons["Previous page"].disabled
         assert not buttons["Next page"].disabled
+        assert not buttons["Last page"].disabled
         assert not buttons["Next game"].disabled
+        for label in _page_button_labels():
+            assert buttons[label].row == db.UserLeaderboardView._ROW_PAGES
+        assert buttons["Previous game"].row == db.UserLeaderboardView._ROW_GAMES
+        assert buttons["Share"].row == db.UserLeaderboardView._ROW_ACTIONS
 
         click = _interaction()
         await view._next_rank_page(click)
         assert view.rank_page_index == 1
         buttons = _buttons(view)
+        assert not buttons["First page"].disabled
         assert not buttons["Previous page"].disabled
         assert buttons["Next page"].disabled
+        assert buttons["Last page"].disabled
         assert click.edit_original_response.await_args.kwargs["attachments"][0].filename == "page-2.png"
+
+        click = _interaction()
+        await view._last_rank_page(click)
+        assert view.rank_page_index == 1
+
+        click = _interaction()
+        await view._first_rank_page(click)
+        assert view.rank_page_index == 0
 
         click = _interaction()
         await view._next_game(click)
@@ -89,8 +108,10 @@ def test_leaderboard_view_pages_ranks_and_games():
         buttons = _buttons(view)
         assert not buttons["Previous game"].disabled
         assert buttons["Next game"].disabled
+        assert buttons["First page"].disabled
         assert buttons["Previous page"].disabled
         assert buttons["Next page"].disabled
+        assert buttons["Last page"].disabled
 
     asyncio.run(run())
 
@@ -109,10 +130,11 @@ def test_game_info_view_keeps_disabled_rank_buttons_visible():
             show_game_controls=False,
         )
         buttons = _buttons(view)
-        assert list(buttons) == ["Previous page", "Next page", "Share"]
-        for label in ("Previous page", "Next page"):
+        assert list(buttons) == [*_page_button_labels(), "Share"]
+        for label in _page_button_labels():
             assert buttons[label].disabled
         assert not buttons["Share"].disabled
+        assert buttons["Share"].row == db.UserLeaderboardView._ROW_ACTIONS
 
     asyncio.run(run())
 

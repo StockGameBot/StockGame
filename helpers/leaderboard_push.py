@@ -22,6 +22,13 @@ import pytz
 
 # from helpers.final_standings_podium import get_podium_generator
 from helpers.recurring_leaderboard_image import get_recurring_generator
+from helpers.affiliations import (
+    aggregate_affiliation_stats,
+    format_dollar_gain,
+)
+from helpers.affiliation_performance_image import create_affiliation_performance_image
+
+AFFILIATION_IMAGE_FILENAME = "affiliation_performance.png"
 
 logger = logging.getLogger("LeaderboardPush")
 
@@ -79,39 +86,42 @@ def build_push_embed(
     """Short playful stats embed for a recurring leaderboard push."""
     d_chg = float(game.change_dollars or 0)
     p_chg = float(game.change_percent or 0)
+    gain_text = format_dollar_gain(d_chg)
     if final:
+        fund_line = (
+            f"The fund **was** {('up' if d_chg >= 0 else 'down')} "
+            f"**{gain_text}** (**{p_chg:+.2f}%**) this month."
+        )
         embed = discord.Embed(
             title=f"🛑 {game.name} (ID: {game.id})",
-            description=(
-                f"The fund **was** {('up' if d_chg >= 0 else 'down')} "
-                f"**${d_chg:+,.2f}** (**{p_chg:+.2f}%**) this month.\n"
-                f"{_format_hours_line(game, final=True)}"
-            ),
+            description=f"{fund_line}\n{_format_hours_line(game, final=True)}",
             color=discord.Color.dark_grey(),
         )
         footer = f"Final standings · {_et_now().strftime('%Y-%m-%d %H:%M')} ET"
     else:
+        fund_line = (
+            f"The fund is {('up' if d_chg >= 0 else 'down')} "
+            f"**{gain_text}** (**{p_chg:+.2f}%**) this month."
+        )
         embed = discord.Embed(
             title=f"{'📈' if d_chg >= 0 else '📉'} {game.name} (ID: {game.id})",
-            description=(
-                f"The fund is {('up' if d_chg >= 0 else 'down')} "
-                f"**${d_chg:+,.2f}** (**{p_chg:+.2f}%**) this month.\n"
-                f"{_format_hours_line(game)}"
-            ),
+            description=f"{fund_line}\n{_format_hours_line(game)}",
             color=discord.Color.green() if d_chg >= 0 else discord.Color.red(),
         )
         footer = f"Last updated · {_et_now().strftime('%Y-%m-%d %H:%M')} ET"
     if best_pick:
+        company = best_pick.get("company_name") or best_pick.get("company") or best_pick["ticker"]
         embed.add_field(
             name="Best owned pick",
-            value=f"`{best_pick['ticker']}` {best_pick['pct']:+.2f}%",
-            inline=True,
+            value=f"{best_pick['ticker']} — {company} {best_pick['pct']:+.2f}%",
+            inline=False,
         )
     if worst_pick:
+        company = worst_pick.get("company_name") or worst_pick.get("company") or worst_pick["ticker"]
         embed.add_field(
             name="Worst owned pick",
-            value=f"`{worst_pick['ticker']}` {worst_pick['pct']:+.2f}%",
-            inline=True,
+            value=f"{worst_pick['ticker']} — {company} {worst_pick['pct']:+.2f}%",
+            inline=False,
         )
     embed.set_footer(text=footer)
     return embed
@@ -164,7 +174,13 @@ def collect_push_players(fe, game) -> tuple[list[dict], list[dict]]:
             continue
         for pick in picks_data:
             if pick["status"] == "owned":
-                owned_pcts.append({"ticker": pick["ticker"], "pct": pick["change_percent"]})
+                owned_pcts.append(
+                    {
+                        "ticker": pick["ticker"],
+                        "pct": pick["change_percent"],
+                        "company_name": pick.get("company_name") or pick.get("company"),
+                    }
+                )
         players.append(
             {
                 "user_id": entry.user_id,
@@ -174,6 +190,7 @@ def collect_push_players(fe, game) -> tuple[list[dict], list[dict]]:
                 "change_percent": entry.change_percent,
                 "days_in_first": getattr(entry, "days_in_first", 0) or 0,
                 "joined": entry.joined,
+                "affiliation": getattr(entry, "affiliation", None),
                 "picks": picks_data,
             }
         )
@@ -319,6 +336,7 @@ def fingerprint_image_rows(
                 "change_dollars": _round_float(player.get("change_dollars")),
                 "change_percent": _round_float(player.get("change_percent")),
                 "days_in_first": int(player.get("days_in_first") or 0),
+                "affiliation": player.get("affiliation"),
                 "picks": picks_payload,
             }
         )
@@ -352,22 +370,39 @@ def render_push_pages(
     owned_pcts: list[dict],
     *,
     created_at: Optional[datetime] = None,
-) -> tuple[discord.Embed, list[BytesIO], str, bool]:
+    affiliations_enabled: bool = False,
+    affiliation_stats: Optional[dict[str, dict[str, float]]] = None,
+) -> tuple[discord.Embed, list[BytesIO], Optional[BytesIO], str, bool]:
     """Build the stats embed plus one PNG buffer per leaderboard page.
 
-    Returns ``(embed, images, fingerprint, cache_hit)``. On cache hit, ``images``
-    are rebuilt from stored PNG bytes (no Pillow).
+    Returns ``(embed, images, affiliation_image, fingerprint, cache_hit)``.
     """
     best = max(owned_pcts, key=lambda x: x["pct"]) if owned_pcts else None
     worst = min(owned_pcts, key=lambda x: x["pct"]) if owned_pcts else None
-    embed = build_push_embed(game, best_pick=best, worst_pick=worst)
+    embed = build_push_embed(
+        game,
+        best_pick=best,
+        worst_pick=worst,
+    )
+    affiliation_image: Optional[BytesIO] = None
+    if affiliations_enabled and affiliation_stats is not None:
+        affiliation_image = create_affiliation_performance_image(
+            overall_dollars=float(game.change_dollars or 0),
+            overall_percent=float(game.change_percent or 0),
+            affiliation_stats=affiliation_stats,
+        )
+        embed.set_image(url=f"attachment://{AFFILIATION_IMAGE_FILENAME}")
     stamp = created_at or _et_now()
-    game_data = {"name": game.name, "id": game.id}
+    game_data = {
+        "name": game.name,
+        "id": game.id,
+        "affiliations_enabled": affiliations_enabled,
+    }
     fingerprint = fingerprint_push_pages(game, players)
     cache_key = str(game.id)
     cached = _push_image_cache.get(cache_key)
     if cached and cached[0] == fingerprint:
-        return embed, _buffers_from_png_bytes(cached[1]), fingerprint, True
+        return embed, _buffers_from_png_bytes(cached[1]), affiliation_image, fingerprint, True
 
     generator = get_recurring_generator()
     images: list[BytesIO] = []
@@ -391,12 +426,14 @@ def render_push_pages(
         images.append(BytesIO(data))
 
     _push_image_cache[cache_key] = (fingerprint, png_bytes)
-    return embed, images, fingerprint, False
+    return embed, images, affiliation_image, fingerprint, False
 
 
 def render_push_payload(game, players: list[dict], owned_pcts: list[dict]) -> tuple[discord.Embed, BytesIO]:
     """Compatibility wrapper: embed plus the first page image."""
-    embed, images, _fingerprint, _hit = render_push_pages(game, players, owned_pcts)
+    embed, images, _affiliation_image, _fingerprint, _hit = render_push_pages(
+        game, players, owned_pcts
+    )
     return embed, images[0]
 
 
@@ -442,11 +479,16 @@ async def _upsert_leaderboard_page(
     image: BytesIO,
     filename: str,
     game_id: Any,
+    extra_files: Optional[list[tuple[BytesIO, str]]] = None,
 ) -> Optional[str]:
     """Edit one page in place, or send a new message when missing/unknown."""
     image.seek(0)
-    file = discord.File(image, filename=filename)
-    edit_kwargs: dict[str, Any] = {"attachments": [file]}
+    attachments: list[discord.File] = [discord.File(image, filename=filename)]
+    if extra_files:
+        for extra_buf, extra_name in extra_files:
+            extra_buf.seek(0)
+            attachments.append(discord.File(extra_buf, filename=extra_name))
+    edit_kwargs: dict[str, Any] = {"attachments": attachments}
     if embed is None:
         edit_kwargs["embeds"] = []
     else:
@@ -456,7 +498,12 @@ async def _upsert_leaderboard_page(
         try:
             msg = await channel.fetch_message(int(message_id))
             image.seek(0)
-            edit_kwargs["attachments"] = [discord.File(image, filename=filename)]
+            attachments = [discord.File(image, filename=filename)]
+            if extra_files:
+                for extra_buf, extra_name in extra_files:
+                    extra_buf.seek(0)
+                    attachments.append(discord.File(extra_buf, filename=extra_name))
+            edit_kwargs["attachments"] = attachments
             await msg.edit(**edit_kwargs)
             return str(msg.id)
         except Exception as exc:
@@ -471,12 +518,16 @@ async def _upsert_leaderboard_page(
             await _delete_message_quiet(channel, message_id)
 
     image.seek(0)
-    file = discord.File(image, filename=filename)
+    attachments = [discord.File(image, filename=filename)]
+    if extra_files:
+        for extra_buf, extra_name in extra_files:
+            extra_buf.seek(0)
+            attachments.append(discord.File(extra_buf, filename=extra_name))
     try:
         if embed is None:
-            sent = await channel.send(file=file)
+            sent = await channel.send(files=attachments)
         else:
-            sent = await channel.send(embed=embed, file=file)
+            sent = await channel.send(embed=embed, files=attachments)
     except Exception as exc:
         logger.warning("Leaderboard page send failed for game %s: %s", game_id, exc)
         return None
@@ -508,6 +559,7 @@ async def push_or_edit_leaderboard_messages(
     fe,
     embed: discord.Embed,
     images: list[BytesIO],
+    affiliation_image: Optional[BytesIO] = None,
 ) -> Optional[str]:
     """
     Sync one Discord message per image page.
@@ -536,6 +588,11 @@ async def push_or_edit_leaderboard_messages(
             image=image,
             filename=filename,
             game_id=game.id,
+            extra_files=(
+                [(affiliation_image, AFFILIATION_IMAGE_FILENAME)]
+                if is_last and affiliation_image is not None
+                else None
+            ),
         )
         if page_id is None:
             # Keep whatever we already synced; leave extras for the next cycle.
@@ -627,8 +684,28 @@ async def push_all_recurring_leaderboards(
                         player["display_name"] = await name_resolver(int(player["user_id"]), guild)
                     except Exception:
                         logger.debug("Name lookup failed for user %s", player["user_id"])
-            embed, images, _fingerprint, cache_hit = await asyncio.to_thread(
-                render_push_pages, game, players, owned_pcts
+            affiliations_on = bool(getattr(template, "affiliations_enabled", False))
+            affiliation_stats = None
+            if affiliations_on:
+                try:
+                    participants = await asyncio.to_thread(
+                        fe.be.get_many_participants,
+                        game_id=game.id,
+                        status="active",
+                    )
+                    affiliation_stats = aggregate_affiliation_stats(
+                        participants,
+                        float(game.start_money),
+                    )
+                except LookupError:
+                    affiliation_stats = aggregate_affiliation_stats([], float(game.start_money))
+            embed, images, affiliation_image, _fingerprint, cache_hit = await asyncio.to_thread(
+                render_push_pages,
+                game,
+                players,
+                owned_pcts,
+                affiliations_enabled=affiliations_on,
+                affiliation_stats=affiliation_stats,
             )
             # Refresh game row for message ids
             game = await asyncio.to_thread(fe.be.get_game, game.id)
@@ -648,6 +725,7 @@ async def push_all_recurring_leaderboards(
                 fe=fe,
                 embed=embed,
                 images=images,
+                affiliation_image=affiliation_image,
             )
         except Exception:
             logger.exception("Recurring leaderboard push failed for game %s", game.id)

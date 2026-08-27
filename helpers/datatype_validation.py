@@ -91,6 +91,7 @@ class GameTemplate(BaseModel):
     push_leaderboard: bool = False
     leaderboard_channel_id: Optional[str] = None
     auto_top_roles: bool = False
+    affiliations_enabled: bool = False
     datetime_created: datetime # YYYY-MM-DD HH:MM:SS
     last_updated: Optional[datetime] = None # YYYY-MM-DD HH:MM:SS
 
@@ -163,6 +164,7 @@ class GameParticipant(BaseModel):
     change_dollars: Optional[float] = None
     change_percent: Optional[float] = None
     days_in_first: int = 0
+    affiliation: Optional[str] = None
     last_updated: Optional[datetime] = Field(default=None, validation_alias=AliasChoices('datetime_updated', 'last_updated')) # YYYY-MM-DD HH:MM:SS
     
 GameParticipants = TypeAdapter(list[GameParticipant])
@@ -217,6 +219,7 @@ class GameLeaderboard(BaseModel):
     change_dollars: float
     change_percent: float
     days_in_first: int = 0
+    affiliation: Optional[str] = None
     display_name: Optional[str] = None
     last_updated: datetime | None = None
 

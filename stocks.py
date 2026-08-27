@@ -667,6 +667,7 @@ class Backend:
         leaderboard_channel_id: Optional[str] = None,
         clear_leaderboard_channel: bool = False,
         auto_top_roles: Optional[bool] = None,
+        affiliations_enabled: Optional[bool] = None,
     ):
         """Update the mutable scheduling / push fields on a recurring-game template."""
         if (
@@ -679,6 +680,7 @@ class Backend:
             and leaderboard_channel_id is None
             and not clear_leaderboard_channel
             and auto_top_roles is None
+            and affiliations_enabled is None
         ):
             raise ValueError('At least one template field must be changed.')
         if status is not None and status not in get_args(dtv.GameTemplateStatus):
@@ -703,6 +705,7 @@ class Backend:
             push_leaderboard=int(push_leaderboard) if push_leaderboard is not None else None,
             leaderboard_channel_id=channel_value,
             auto_top_roles=int(auto_top_roles) if auto_top_roles is not None else None,
+            affiliations_enabled=int(affiliations_enabled) if affiliations_enabled is not None else None,
             last_updated=_iso8601(),
         )
 
@@ -1181,7 +1184,7 @@ class Backend:
         resp = self.sql.get(table='game_participants', order=order, filters=filters, ) 
         return self._many_get(typeadapter=dtv.GameParticipants, resp=resp)
     
-    def update_participant(self, participant_id:int, status:Optional[str]=None, current_value:Optional[float]=None, change_dollars:Optional[float]=None, change_percent:Optional[float]=None, days_in_first:Optional[int]=None):
+    def update_participant(self, participant_id:int, status:Optional[str]=None, current_value:Optional[float]=None, change_dollars:Optional[float]=None, change_percent:Optional[float]=None, days_in_first:Optional[int]=None, affiliation:Optional[str]=None, clear_affiliation:bool=False):
         """Update a game participant
 
         Args:
@@ -1191,8 +1194,10 @@ class Backend:
             change_dollars (float, optional): current_value - (starting_money / total_picks).  Rounded to two decimal points.
             change_percent (float, optional): change_dollars in percent format.  Rounded to two decimal points.
             days_in_first (Optional[int], optional): Days ended ranked #1 after NYSE close.
+            affiliation (Optional[str], optional): Recurring hedge-fund team key.
+            clear_affiliation (bool, optional): Set affiliation to NULL (Independent).
         """
-        
+        affiliation_value = 'NULL' if clear_affiliation else affiliation
         self._update_single(
             table='game_participants',
             id_column='participation_id',
@@ -1202,8 +1207,41 @@ class Backend:
             change_dollars = round(change_dollars, 2) if change_dollars is not None else None,
             change_percent = round(change_percent, 2) if change_percent is not None else None,
             days_in_first = days_in_first,
+            affiliation = affiliation_value,
             last_updated = _iso8601()
             )
+        
+    def set_participant_affiliation(
+        self,
+        user_id: int,
+        game_id: int | str,
+        affiliation: str | None,
+    ) -> dtv.GameParticipant:
+        """Assign a hedge-fund affiliation for a recurring-game participant."""
+        from helpers.affiliations import is_affiliations_enabled, normalize_affiliation
+
+        game = self.get_game(game_id)
+        if game.template_id is None:
+            raise ValueError('Affiliations are only available in recurring games.')
+        if not is_affiliations_enabled(self, game):
+            raise ValueError('Affiliations are not enabled for this game.')
+        canonical = normalize_affiliation(affiliation)
+        try:
+            participant = self.get_many_participants(game_id=game_id, user_id=user_id)[0]
+        except LookupError as exc:
+            raise LookupError('Player not in game.') from exc
+        if participant.status != 'active':
+            raise ValueError('Only active players can choose an affiliation.')
+        existing = getattr(participant, 'affiliation', None)
+        if existing is not None and existing != canonical:
+            raise ValueError('Affiliation cannot be changed once chosen.')
+        if existing == canonical:
+            return participant
+        if canonical is None:
+            self.update_participant(participant.id, clear_affiliation=True)
+        else:
+            self.update_participant(participant.id, affiliation=canonical)
+        return self.get_participant(participant.id)
         
     def remove_participant(self, participant_id:int):
         """Remove a game participant
@@ -2360,6 +2398,7 @@ class Frontend: # This will be where a bot (like discord) interacts
                         'change_dollars': round(player.change_dollars, 2) if player.change_dollars else 0, # Round to two decimal places
                         'change_percent': round(player.change_percent, 2) if player.change_percent else 0, # Round to two decimal places
                         'days_in_first': int(getattr(player, 'days_in_first', 0) or 0),
+                        'affiliation': getattr(player, 'affiliation', None),
                         'display_name': user.display_name or f'ID({player.user_id})',
                         'last_updated': player.last_updated
                     }) # Should keep order
@@ -2415,6 +2454,15 @@ class Frontend: # This will be where a bot (like discord) interacts
             raise
         except LookupError:
             raise LookupError('Game not found.')
+
+    def set_participant_affiliation(
+        self,
+        user_id: int,
+        game_id: int | str,
+        affiliation: str | None,
+    ) -> dtv.GameParticipant:
+        """Assign hedge-fund affiliation for the user in a recurring game."""
+        return self.be.set_participant_affiliation(user_id, game_id, affiliation)
 
     def get_pending_game_invite(self, user_id: int, game_id: str) -> dtv.GameInvite | None:
         try:

@@ -26,7 +26,7 @@ logger = logging.getLogger("DbSchema")
 # # (YYYY-MM-DD HH:MM:SS) objects should include 'datetime' in the key name
 # # (YYYY-MM-DD) objects should include 'date' in the key name
 
-db_ver = "0.2.6"  # Current schema version
+db_ver = "0.2.7"  # Current schema version
 
 # (from_version, to_version) -> migration function that mutates ``db_name`` in place.
 # When no entry matches a version jump, :func:`ensure_database` remakes empty.
@@ -190,12 +190,32 @@ def _migrate_0_2_5_to_0_2_6(db_name: str) -> None:
         conn.close()
 
 
+def _migrate_0_2_6_to_0_2_7(db_name: str) -> None:
+    """Add recurring hedge-fund affiliations on templates and participants."""
+    conn = sqlite3.connect(db_name)
+    try:
+        template_cols = {row[1] for row in conn.execute("PRAGMA table_info(game_templates)")}
+        if "affiliations_enabled" not in template_cols:
+            conn.execute(
+                "ALTER TABLE game_templates ADD COLUMN affiliations_enabled INTEGER NOT NULL DEFAULT 0"
+            )
+        participant_cols = {row[1] for row in conn.execute("PRAGMA table_info(game_participants)")}
+        if "affiliation" not in participant_cols:
+            conn.execute(
+                "ALTER TABLE game_participants ADD COLUMN affiliation TEXT DEFAULT NULL"
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 MIGRATIONS: dict[tuple[str, str], MigrationFn] = {
     ("0.2.1", "0.2.2"): _migrate_0_2_1_to_0_2_2,
     ("0.2.2", "0.2.3"): _migrate_0_2_2_to_0_2_3,
     ("0.2.3", "0.2.4"): _migrate_0_2_3_to_0_2_4,
     ("0.2.4", "0.2.5"): _migrate_0_2_4_to_0_2_5,
     ("0.2.5", "0.2.6"): _migrate_0_2_5_to_0_2_6,
+    ("0.2.6", "0.2.7"): _migrate_0_2_6_to_0_2_7,
 }
 
 
@@ -377,6 +397,11 @@ def create(db_name:str, upgrade:bool=True):
 
     # Changelog
 
+    ## [0.2.7] - 2026-08-26
+    ### Added
+    - ``affiliations_enabled`` on game_templates for recurring hedge-fund teams
+    - ``affiliation`` on game_participants (atrioc, dougdoug, aiden, working_class)
+
     ## [0.2.6] - 2026-08-26
     ### Added
     - ``invalid_stocks`` table for short-lived negative ticker lookups
@@ -491,6 +516,7 @@ def create(db_name:str, upgrade:bool=True):
         push_leaderboard INTEGER NOT NULL DEFAULT 0,          -- Auto-push leaderboard image to a channel
         leaderboard_channel_id TEXT DEFAULT NULL,             -- Discord channel snowflake as text
         auto_top_roles INTEGER NOT NULL DEFAULT 0,          -- Auto-assign 1st/2nd/3rd roles when each game ends
+        affiliations_enabled INTEGER NOT NULL DEFAULT 0,    -- Hedge-fund team affiliations for recurring games
         datetime_created TEXT NOT NULL,                       -- ISO8601 (YYYY-MM-DD HH:MM:SS)
         last_updated TEXT DEFAULT NULL,                       -- ISO8601 (YYYY-MM-DD HH:MM:SS)
         
@@ -567,6 +593,7 @@ def create(db_name:str, upgrade:bool=True):
         change_dollars REAL DEFAULT NULL,
         change_percent REAL DEFAULT NULL,
         days_in_first INTEGER NOT NULL DEFAULT 0, -- Days ended as #1 (NYSE close snapshots)
+        affiliation TEXT DEFAULT NULL,          -- Recurring hedge-fund team (atrioc, dougdoug, aiden, working_class)
         last_updated TEXT DEFAULT NULL,         -- ISO8601 (YYYY-MM-DD HH:MM:SS)
         
         FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,

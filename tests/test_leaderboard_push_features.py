@@ -154,7 +154,7 @@ def test_render_push_pages_splits_top_twenty_without_image_titles(mocker):
     )
     players = [{"user_id": user_id} for user_id in range(20)]
 
-    embed, images, fingerprint, cache_hit = lp.render_push_pages(game, players, [])
+    embed, images, _affiliation_image, fingerprint, cache_hit = lp.render_push_pages(game, players, [])
 
     assert cache_hit is False
     assert fingerprint
@@ -166,7 +166,7 @@ def test_render_push_pages_splits_top_twenty_without_image_titles(mocker):
     assert [row["rank"] for row in calls[1].args[1]] == [6, 7, 8, 9, 10]
     assert all(call.kwargs["created_at"] is not None for call in calls)
 
-    embed2, images2, fingerprint2, cache_hit2 = lp.render_push_pages(game, players, [])
+    embed2, images2, _affiliation_image2, fingerprint2, cache_hit2 = lp.render_push_pages(game, players, [])
     assert cache_hit2 is True
     assert fingerprint2 == fingerprint
     assert len(images2) == 4
@@ -440,6 +440,7 @@ def test_push_uses_live_name_resolver():
     template = MagicMock()
     template.push_leaderboard = 1
     template.leaderboard_channel_id = "42"
+    template.affiliations_enabled = False
 
     fe = MagicMock()
     fe.be.get_many_games.return_value = [game]
@@ -453,7 +454,7 @@ def test_push_uses_live_name_resolver():
 
     rendered: dict = {}
 
-    def fake_render(_game, players, _owned):
+    def fake_render(_game, players, _owned, **_kwargs):
         rendered["players"] = [dict(p) for p in players]
         return discord.Embed(title="t"), [BytesIO(b"png")], "fp1", False
 
