@@ -1,4 +1,4 @@
-"""Alpaca market-data helpers (stocks only — no crypto)."""
+"""Alpaca market-data helpers (stocks only - no crypto)."""
 
 from __future__ import annotations
 

@@ -27,7 +27,7 @@ FUND_ICON_GAP = 6
 FUND_TEXT_X = FUND_ICON_X + FUND_ICON_SLOT + FUND_ICON_GAP
 _FUND_SHIFT = FUND_ICON_SLOT + FUND_ICON_GAP
 
-# (label, alignment, x, width) — compact column layout
+# (label, alignment, x, width) - compact column layout
 _COLUMNS = (
     ("Fund", "left", FUND_TEXT_X, 134),
     ("Members", "right", 168 + _FUND_SHIFT, 44),

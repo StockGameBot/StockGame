@@ -87,8 +87,8 @@ def lookup_company_name(
 
 
 def autocomplete_label(ticker: str, company_name: Optional[str]) -> str:
-    """Discord choice label: ``TICKER — Name`` or bare ``TICKER``."""
+    """Discord choice label: ``TICKER - Name`` or bare ``TICKER``."""
     name = _clean_name(company_name, ticker)
     if not name:
         return ticker
-    return f"{ticker} — {name}"
+    return f"{ticker} - {name}"
