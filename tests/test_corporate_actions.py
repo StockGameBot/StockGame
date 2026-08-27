@@ -118,7 +118,7 @@ def test_buy_stock_rejects_untradeable_on_alpaca(fe, mocker):
     game_id = be.add_game(owner_id, "G", "2026-01-01", starting_money=1000, total_picks=1)
     be.add_participant(owner_id, game_id, force_active=True)
     mocker.patch.object(fe.gl, "find_stock", return_value="ZEUS")
-    mocker.patch.object(fe.gl.alpaca, "get_us_equity", side_effect=ValueError("Stock is not tradeable"))
+    mocker.patch.object(fe.gl.alpaca, "verify_equity_buyable", return_value=False)
     with pytest.raises(ValueError, match="not tradeable"):
         fe.buy_stock(user_id=owner_id, game_id=game_id, ticker="ZEUS")
 
@@ -154,6 +154,39 @@ def test_repair_untradeable_equity_removes_picks(be, mocker):
     assert len(remaining) == 1
     assert remaining[0].stock_id == msft.id
     assert be.get_stock("ZEUS").trade_status == "delisted"
+
+
+def test_repair_untradeable_falls_back_to_stale_iex(be, mocker):
+    from helpers.repairs_0_2_8 import repair_untradeable_equity_picks
+
+    be.add_stock("ZEUS", "nasdaq", "ZEUS")
+    be.add_stock("MSFT", "nasdaq", "Microsoft")
+    zeus = be.get_stock("ZEUS")
+    msft = be.get_stock("MSFT")
+    be.add_user(1, "discord", "player")
+    game_id = be.add_game(1, "G", "2026-01-01", starting_money=1000, total_picks=2)
+    be.add_participant(1, game_id, force_active=True)
+    participant = be.get_many_participants(user_id=1, game_id=game_id)[0]
+    be.add_stock_pick(participant.id, zeus.id)
+    be.add_stock_pick(participant.id, msft.id)
+    for pick in be.get_many_stock_picks(participant_id=participant.id):
+        be.update_stock_pick(pick_id=pick.id, status="owned", shares=10.0, current_value=500.0)
+
+    class FakeAlpaca:
+        configured = True
+
+        def fetch_buyable_db_tickers(self):
+            return None
+
+        def is_stale_iex_trade(self, ticker, *, max_age_days=30.0):
+            return ticker.upper() == "ZEUS"
+
+    report = repair_untradeable_equity_picks(be, FakeAlpaca(), force=True)
+    assert report.picks_removed == 1
+    assert "ZEUS" in report.tickers
+    remaining = be.get_many_stock_picks(participant_id=participant.id)
+    assert len(remaining) == 1
+    assert remaining[0].stock_id == msft.id
 
 
 def test_repair_stress_test_end_date(be):

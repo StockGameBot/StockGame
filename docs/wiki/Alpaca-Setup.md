@@ -24,11 +24,7 @@ Without keys, the Discord bot can still start, but price updates will fail until
 
 ## Smoke test
 
-From the project root (with `.env` loaded):
-
-```bash
-python scripts/test_alpaca_prices.py
-```
+Start the bot with valid keys in `.env` and check logs for a successful scheduled update or run `/update` (moderator) once. You should see price fetches without “Alpaca credentials missing” or repeated 401 errors.
 
 ## Troubleshooting
 

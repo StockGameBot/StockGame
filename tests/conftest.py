@@ -62,13 +62,7 @@ def fe(db_path, mocker):
     frontend = Frontend(database_name=db_path, owner_user_id=10, source='testing')
     mocker.patch.object(
         frontend.gl.alpaca,
-        "get_us_equity",
-        return_value={
-            "name": "Test Company",
-            "exchange": "NASDAQ",
-            "status": "active",
-            "tradable": True,
-            "class": "us_equity",
-        },
+        "verify_equity_buyable",
+        return_value=True,
     )
     return frontend

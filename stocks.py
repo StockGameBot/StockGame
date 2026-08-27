@@ -2231,24 +2231,30 @@ class GameLogic: # Might move some of the control/running actions here
             raise ValueError("Unable to find stock")
 
         self.be.clear_invalid_ticker(db_ticker)
-        try:
-            asset = self.alpaca.get_us_equity(db_ticker)
-        except LookupError:
+        buyable = self.alpaca.verify_equity_buyable(db_ticker)
+        if buyable is False:
+            self.be.record_invalid_ticker(db_ticker)
+            raise ValueError("Stock is not tradeable")
+        if buyable is None and self.alpaca.is_stale_iex_trade(db_ticker):
+            self.be.record_invalid_ticker(db_ticker)
+            raise ValueError("Stock is not tradeable")
+
+        asset, api_ok = self.alpaca.fetch_asset_raw(db_ticker)
+        if buyable is True and asset is None:
             self.be.record_invalid_ticker(db_ticker)
             raise ValueError("Unable to find stock")
-        except ValueError:
-            self.be.record_invalid_ticker(db_ticker)
-            raise
 
         company_name = db_ticker
-        exchange = str(asset.get("exchange") or "UNKNOWN")
+        exchange = "UNKNOWN"
+        if isinstance(asset, dict):
+            exchange = str(asset.get("exchange") or "UNKNOWN")
         try:
             from helpers.equity_meta import lookup_company_name
 
             resolved_name = lookup_company_name(db_ticker, alpaca=self.alpaca)
             if resolved_name:
                 company_name = resolved_name
-            elif asset.get("name"):
+            elif isinstance(asset, dict) and asset.get("name"):
                 from helpers.equity_meta import autocomplete_label
 
                 raw_name = str(asset["name"]).strip()
@@ -2936,12 +2942,11 @@ class Frontend: # This will be where a bot (like discord) interacts
         stock = self.be.get_stock(ticker_or_id=resolved_ticker)
         if getattr(stock, 'trade_status', 'active') == 'delisted':
             raise ValueError('Stock was delisted and can no longer be purchased.')
-        try:
-            self.gl.alpaca.get_us_equity(resolved_ticker)
-        except ValueError:
+        buyable = self.gl.alpaca.verify_equity_buyable(resolved_ticker)
+        if buyable is False:
             raise ValueError('Stock is not tradeable')
-        except LookupError:
-            raise ValueError('Unable to find stock')
+        if buyable is None and self.gl.alpaca.is_stale_iex_trade(resolved_ticker):
+            raise ValueError('Stock is not tradeable')
 
         # Draft mode: prevent duplicate tickers across players
         game = self.be.get_game(game_id=game_id)

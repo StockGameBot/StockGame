@@ -20,6 +20,7 @@ UNTRADEABLE_REPAIR_KEY = f"untradeable-pick-repair-{REPAIR_DATE}"
 STRESS_TEST_GAME_ID = "LWFN6"
 STRESS_TEST_END_DATE = "2026-08-31"
 STRESS_TEST_END_REPAIR_KEY = f"stress-test-end-date-{STRESS_TEST_END_DATE}"
+STALE_IEX_TRADE_DAYS = 30.0
 
 
 @dataclass
@@ -82,6 +83,105 @@ def _find_stress_test_game(be: "Backend"):
     return None
 
 
+def _stocks_with_active_picks(
+    be: "Backend",
+    *,
+    game_id: Optional[str | int] = None,
+) -> list:
+    """Distinct ``stocks`` rows that still have removable picks."""
+    try:
+        all_stocks = be.get_many_stocks()
+    except LookupError:
+        return []
+    held: list = []
+    for stock in all_stocks:
+        if be.get_active_picks_for_stock(stock.id, game_id=game_id):
+            held.append(stock)
+    return held
+
+
+def _mark_delisted_and_remove_picks(
+    be: "Backend",
+    stock,
+    report: UntradeableRepairReport,
+    *,
+    game_id: Optional[str | int] = None,
+    reason: str,
+) -> None:
+    ticker = str(stock.ticker).upper()
+    if getattr(stock, "trade_status", "active") != "delisted":
+        be.set_stock_trade_status(stock.id, "delisted")
+        report.stocks_marked += 1
+        report.tickers.append(ticker)
+
+    for pick in be.get_active_picks_for_stock(stock.id, game_id=game_id):
+        be.remove_stock_pick(pick.id)
+        report.picks_removed += 1
+        logger.warning(
+            "Removed pick %s (%s) from participant %s — %s",
+            pick.id,
+            ticker,
+            pick.participation_id,
+            reason,
+        )
+
+
+def _repair_via_buyable_list(
+    be: "Backend",
+    alpaca: "AlpacaMarketData",
+    buyable: set[str],
+    stocks: tuple,
+    report: UntradeableRepairReport,
+    *,
+    game_id: Optional[str | int] = None,
+) -> None:
+    for stock in stocks:
+        ticker = str(stock.ticker).upper()
+        trade_status = getattr(stock, "trade_status", "active")
+        is_buyable = ticker in buyable
+
+        if is_buyable and trade_status == "active":
+            continue
+
+        if not is_buyable:
+            _mark_delisted_and_remove_picks(
+                be,
+                stock,
+                report,
+                game_id=game_id,
+                reason="ticker not buyable on Alpaca",
+            )
+
+
+def _repair_via_stale_iex_trades(
+    be: "Backend",
+    alpaca: "AlpacaMarketData",
+    stocks: list,
+    report: UntradeableRepairReport,
+    *,
+    game_id: Optional[str | int] = None,
+) -> None:
+    """Fallback when trading API keys cannot list assets (market-data-only keys)."""
+    logger.warning(
+        "Using stale IEX trade fallback (>%s days) for %s held ticker(s)",
+        STALE_IEX_TRADE_DAYS,
+        len(stocks),
+    )
+    for stock in stocks:
+        if not alpaca.is_stale_iex_trade(
+            str(stock.ticker),
+            max_age_days=STALE_IEX_TRADE_DAYS,
+        ):
+            continue
+        _mark_delisted_and_remove_picks(
+            be,
+            stock,
+            report,
+            game_id=game_id,
+            reason="no IEX trade in %s days" % int(STALE_IEX_TRADE_DAYS),
+        )
+
+
 def repair_untradeable_equity_picks(
     be: "Backend",
     alpaca: "AlpacaMarketData",
@@ -102,35 +202,17 @@ def repair_untradeable_equity_picks(
         report.runtime_sec = time.perf_counter() - start
         return report
 
-    buyable = alpaca.fetch_buyable_db_tickers()
     try:
         stocks = be.get_many_stocks()
     except LookupError:
         stocks = ()
 
-    for stock in stocks:
-        ticker = str(stock.ticker).upper()
-        trade_status = getattr(stock, "trade_status", "active")
-        is_buyable = ticker in buyable
-
-        if is_buyable and trade_status == "active":
-            continue
-
-        if not is_buyable and trade_status != "delisted":
-            be.set_stock_trade_status(stock.id, "delisted")
-            report.stocks_marked += 1
-            report.tickers.append(ticker)
-
-        picks = be.get_active_picks_for_stock(stock.id, game_id=game_id)
-        for pick in picks:
-            be.remove_stock_pick(pick.id)
-            report.picks_removed += 1
-            logger.warning(
-                "Removed pick %s (%s) from participant %s — ticker not buyable on Alpaca",
-                pick.id,
-                ticker,
-                pick.participation_id,
-            )
+    buyable = alpaca.fetch_buyable_db_tickers()
+    if buyable is not None:
+        _repair_via_buyable_list(be, alpaca, buyable, stocks, report, game_id=game_id)
+    else:
+        held = _stocks_with_active_picks(be, game_id=game_id)
+        _repair_via_stale_iex_trades(be, alpaca, held, report, game_id=game_id)
 
     if report.picks_removed or report.stocks_marked:
         _record_repair(be, UNTRADEABLE_REPAIR_KEY, "untradeable_repair", force=force)
@@ -184,14 +266,21 @@ def run_repairs_0_2_8(
     *,
     force: bool = False,
 ) -> Repairs028Report:
-    """Run all one-time 0.2.8 repairs."""
+    """Run all one-time 0.2.8 repairs (each step isolated — one failure won't block others)."""
     start = time.perf_counter()
     stress_game = _find_stress_test_game(be)
-    report = Repairs028Report(
-        untradeable=repair_untradeable_equity_picks(be, alpaca, force=force),
-        stress_test_end_date_set=repair_stress_test_end_date(be, force=force),
-        stress_test_game_id=str(stress_game.id) if stress_game else None,
-    )
+    report = Repairs028Report(stress_test_game_id=str(stress_game.id) if stress_game else None)
+
+    try:
+        report.untradeable = repair_untradeable_equity_picks(be, alpaca, force=force)
+    except Exception:
+        logger.exception("Untradeable equity repair failed")
+
+    try:
+        report.stress_test_end_date_set = repair_stress_test_end_date(be, force=force)
+    except Exception:
+        logger.exception("Stress test end-date repair failed")
+
     report.runtime_sec = time.perf_counter() - start
     logger.info(
         "0.2.8 repairs complete in %.2fs: picks_removed=%s stress_test_end=%s",

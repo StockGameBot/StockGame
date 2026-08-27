@@ -177,13 +177,95 @@ class AlpacaMarketData:
 
         return asset
 
-    def fetch_buyable_db_tickers(self) -> set[str]:
-        """Return DB-normalized tickers for all active, tradable US equities."""
+    def verify_equity_buyable(self, ticker: str) -> Optional[bool]:
+        """Return buyable status, or ``None`` when the trading API is unauthorized.
+
+        ``True`` — active and tradable on Alpaca.
+        ``False`` — found but inactive / not tradable.
+        ``None`` — could not check (401/403 on trading API keys).
+        """
+        self._require_configured()
+        symbol = to_alpaca_symbol(ticker)
+        r = self._get(f"{self.trading_base}/v2/assets/{quote(symbol, safe='')}")
+        if r.status_code in (401, 403):
+            logger.warning(
+                "Alpaca trading API unauthorized (%s); buyability check skipped for %s",
+                r.status_code,
+                to_db_ticker(ticker),
+            )
+            return None
+        if r.status_code == 404:
+            return False
+        r.raise_for_status()
+        asset = r.json()
+        if not isinstance(asset, dict):
+            return False
+        if str(asset.get("class") or "") != "us_equity":
+            return False
+        if asset.get("status") != "active" or not asset.get("tradable"):
+            return False
+        return True
+
+    def fetch_asset_raw(self, ticker: str) -> tuple[Optional[dict[str, Any]], Optional[bool]]:
+        """Fetch ``/v2/assets/{symbol}`` without raising.
+
+        Returns ``(asset_dict, api_available)``.
+        ``api_available`` is False on 401/403; ``asset_dict`` is None on 404.
+        """
+        self._require_configured()
+        symbol = to_alpaca_symbol(ticker)
+        r = self._get(f"{self.trading_base}/v2/assets/{quote(symbol, safe='')}")
+        if r.status_code in (401, 403):
+            return None, False
+        if r.status_code == 404:
+            return None, True
+        r.raise_for_status()
+        data = r.json()
+        return (data if isinstance(data, dict) else None), True
+
+    def latest_trade_age_days(self, ticker: str) -> Optional[float]:
+        """Days since the latest IEX ``latestTrade``, or ``None`` if missing."""
+        self._require_configured()
+        symbol = to_alpaca_symbol(ticker)
+        try:
+            data = self.fetch_snapshots([symbol])
+        except Exception:
+            logger.debug("Snapshot fetch failed for %s", ticker, exc_info=True)
+            return None
+        snap = data.get(symbol)
+        if not isinstance(snap, dict):
+            return None
+        ts = trade_timestamp_from_snapshot(snap)
+        if ts is None:
+            return None
+        from datetime import datetime, timezone
+
+        age = datetime.now(timezone.utc) - ts.astimezone(timezone.utc)
+        return age.total_seconds() / 86400.0
+
+    def is_stale_iex_trade(self, ticker: str, *, max_age_days: float = 30.0) -> bool:
+        """True when there is no recent IEX print (likely delisted / illiquid ghost)."""
+        age = self.latest_trade_age_days(ticker)
+        if age is None:
+            return True
+        return age > max_age_days
+
+    def fetch_buyable_db_tickers(self) -> Optional[set[str]]:
+        """Return DB-normalized tickers for all active, tradable US equities.
+
+        Returns ``None`` when trading API keys cannot access ``/v2/assets`` (401/403).
+        """
         self._require_configured()
         r = self._get(
             f"{self.trading_base}/v2/assets",
             params={"status": "active", "asset_class": "us_equity"},
         )
+        if r.status_code in (401, 403):
+            logger.warning(
+                "Alpaca trading API unauthorized (%s); cannot fetch buyable ticker list",
+                r.status_code,
+            )
+            return None
         r.raise_for_status()
         data = r.json()
         if not isinstance(data, list):
