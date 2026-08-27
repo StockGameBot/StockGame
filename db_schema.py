@@ -26,7 +26,7 @@ logger = logging.getLogger("DbSchema")
 # # (YYYY-MM-DD HH:MM:SS) objects should include 'datetime' in the key name
 # # (YYYY-MM-DD) objects should include 'date' in the key name
 
-db_ver = "0.2.7"  # Current schema version
+db_ver = "0.2.8"  # Current schema version
 
 # (from_version, to_version) -> migration function that mutates ``db_name`` in place.
 # When no entry matches a version jump, :func:`ensure_database` remakes empty.
@@ -209,6 +209,52 @@ def _migrate_0_2_6_to_0_2_7(db_name: str) -> None:
         conn.close()
 
 
+def _migrate_0_2_7_to_0_2_8(db_name: str) -> None:
+    """Corporate actions: trade_status, event labels, staging/apply audit tables."""
+    conn = sqlite3.connect(db_name)
+    try:
+        stock_cols = {row[1] for row in conn.execute("PRAGMA table_info(stocks)")}
+        if "trade_status" not in stock_cols:
+            conn.execute(
+                "ALTER TABLE stocks ADD COLUMN trade_status TEXT NOT NULL DEFAULT 'active'"
+            )
+        pick_cols = {row[1] for row in conn.execute("PRAGMA table_info(stock_picks)")}
+        if "event_label" not in pick_cols:
+            conn.execute(
+                "ALTER TABLE stock_picks ADD COLUMN event_label TEXT DEFAULT NULL"
+            )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS staged_corporate_actions (
+                staged_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alpaca_ca_id TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                stock_id INTEGER NOT NULL,
+                pick_id INTEGER,
+                share_factor REAL,
+                payload TEXT,
+                trade_date TEXT NOT NULL,
+                datetime_staged TEXT NOT NULL,
+                UNIQUE (alpaca_ca_id, pick_id),
+                FOREIGN KEY (stock_id) REFERENCES stocks (stock_id),
+                FOREIGN KEY (pick_id) REFERENCES stock_picks (pick_id)
+            );"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS applied_corporate_actions (
+                applied_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alpaca_ca_id TEXT NOT NULL UNIQUE,
+                action_type TEXT NOT NULL,
+                stock_id INTEGER NOT NULL,
+                process_date TEXT NOT NULL,
+                datetime_applied TEXT NOT NULL,
+                FOREIGN KEY (stock_id) REFERENCES stocks (stock_id)
+            );"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 MIGRATIONS: dict[tuple[str, str], MigrationFn] = {
     ("0.2.1", "0.2.2"): _migrate_0_2_1_to_0_2_2,
     ("0.2.2", "0.2.3"): _migrate_0_2_2_to_0_2_3,
@@ -216,6 +262,7 @@ MIGRATIONS: dict[tuple[str, str], MigrationFn] = {
     ("0.2.4", "0.2.5"): _migrate_0_2_4_to_0_2_5,
     ("0.2.5", "0.2.6"): _migrate_0_2_5_to_0_2_6,
     ("0.2.6", "0.2.7"): _migrate_0_2_6_to_0_2_7,
+    ("0.2.7", "0.2.8"): _migrate_0_2_7_to_0_2_8,
 }
 
 
@@ -565,6 +612,7 @@ def create(db_name:str, upgrade:bool=True):
         ticker TEXT NOT NULL,           -- Stock ticker
         exchange TEXT NOT NULL,         -- Stock exchange that it is listed on should alwaws be lowercase
         company_name TEXT,              -- Optional?
+        trade_status TEXT NOT NULL DEFAULT 'active',  -- active | delisted | merged
         
         UNIQUE (ticker)
         );""")
@@ -615,11 +663,37 @@ def create(db_name:str, upgrade:bool=True):
         status TEXT DEFAULT 'pending_buy',            -- Status of pick. Options: 'pending_buy', 'owned', 'pending_sell', 'sold'
         datetime_created TEXT NOT NULL,                       -- ISO8601 (YYYY-MM-DD HH:MM:SS)
         last_updated TEXT DEFAULT NULL,                    -- ISO8601 (YYYY-MM-DD HH:MM:SS)
+        event_label TEXT DEFAULT NULL,                   -- Corporate-action badge for portfolio UI
         
         FOREIGN KEY (participation_id) REFERENCES game_participants (participation_id) ON DELETE CASCADE,
         FOREIGN KEY (stock_id) REFERENCES stocks (stock_id) ON DELETE RESTRICT, -- Don't delete a stock if picks exist? Or CASCADE? Depends on desired behavior. RESTRICT is safer.
         
         UNIQUE (participation_id, stock_id) -- User picks a specific stock only once per game participation
+        );""")
+
+    cursor.execute("""CREATE TABLE IF NOT EXISTS staged_corporate_actions (
+        staged_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        alpaca_ca_id TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        stock_id INTEGER NOT NULL,
+        pick_id INTEGER,
+        share_factor REAL,
+        payload TEXT,
+        trade_date TEXT NOT NULL,
+        datetime_staged TEXT NOT NULL,
+        UNIQUE (alpaca_ca_id, pick_id),
+        FOREIGN KEY (stock_id) REFERENCES stocks (stock_id),
+        FOREIGN KEY (pick_id) REFERENCES stock_picks (pick_id)
+        );""")
+
+    cursor.execute("""CREATE TABLE IF NOT EXISTS applied_corporate_actions (
+        applied_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        alpaca_ca_id TEXT NOT NULL UNIQUE,
+        action_type TEXT NOT NULL,
+        stock_id INTEGER NOT NULL,
+        process_date TEXT NOT NULL,
+        datetime_applied TEXT NOT NULL,
+        FOREIGN KEY (stock_id) REFERENCES stocks (stock_id)
         );""")
 
     cursor.execute("""CREATE TABLE IF NOT EXISTS game_invites (

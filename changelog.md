@@ -14,6 +14,27 @@ SQLite schema versions match `db_schema.db_ver`. **Beta** began with [PR #162](h
 
 ### Fixed
 
+## [0.2.8] - 2026-08-27 (Beta)
+
+### Added
+
+- Corporate action handling (splits, renames, mergers, delistings) via Alpaca date-only CA poll; two-phase stage (9:00 ET) / apply (9:30 ET)
+- Schema 0.2.8: `stocks.trade_status`, `stock_picks.event_label`, `staged_corporate_actions`, `applied_corporate_actions`
+- Split-price retry loop for post-open trades; portfolio red event badges for CA labels
+- Market-aligned update schedule (9:15 pre-open through 16:15 post-close, 15-min grid)
+- `scripts/spike_corporate_actions.py` for manual CA API probes
+- One-time IMCC 2026-08-27 reverse-split repair on bot startup
+
+### Changed
+
+- Alpaca snapshot batch size raised to 500; price polling gated to weekday market windows unless forced
+- `pending_buy` picks settle only during market hours
+- `/buy-stock` rejects delisted tickers with a clear error message
+
+### Fixed
+
+- Split-day phantom gains when share count was not adjusted before revaluation
+
 ## [0.2.7] - 2026-08-26 (Beta)
 
 ### Added

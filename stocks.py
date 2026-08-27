@@ -782,6 +782,104 @@ class Backend:
             return
         self._update_single(table='stocks', id_column='stock_id', item_id=stock.id, **updates)
 
+    def rename_stock_ticker(self, stock_id: int, new_ticker: str) -> None:
+        """Update a stock ticker (corporate name change)."""
+        self._update_single(
+            table='stocks',
+            id_column='stock_id',
+            item_id=stock_id,
+            ticker=to_db_ticker(new_ticker),
+        )
+
+    def set_stock_trade_status(self, stock_id: int, trade_status: str) -> None:
+        """Set ``trade_status`` (active, delisted, merged)."""
+        self._update_single(
+            table='stocks',
+            id_column='stock_id',
+            item_id=stock_id,
+            trade_status=trade_status,
+        )
+
+    def insert_staged_corporate_action(
+        self,
+        *,
+        alpaca_ca_id: str,
+        action_type: str,
+        stock_id: int,
+        pick_id: Optional[int],
+        share_factor: Optional[float],
+        payload: str,
+        trade_date: str,
+        datetime_staged: str,
+    ) -> None:
+        try:
+            self.sql.insert(
+                table='staged_corporate_actions',
+                items={
+                    'alpaca_ca_id': alpaca_ca_id,
+                    'action_type': action_type,
+                    'stock_id': stock_id,
+                    'pick_id': pick_id,
+                    'share_factor': share_factor,
+                    'payload': payload,
+                    'trade_date': trade_date,
+                    'datetime_staged': datetime_staged,
+                },
+            )
+        except Exception as exc:
+            if 'UNIQUE' in str(exc).upper():
+                return
+            raise
+
+    def count_staged_corporate_actions(self, trade_date: str) -> int:
+        resp = self.sql.get(
+            table='staged_corporate_actions',
+            filters={'trade_date': trade_date},
+        )
+        if resp.status != 'success' or not isinstance(resp.result, tuple):
+            return 0
+        return len(resp.result)
+
+    def get_staged_corporate_actions(self, trade_date: str) -> list[dict]:
+        resp = self.sql.get(
+            table='staged_corporate_actions',
+            filters={'trade_date': trade_date},
+        )
+        if resp.status != 'success' or not isinstance(resp.result, tuple):
+            return []
+        return [row for row in resp.result if isinstance(row, dict)]
+
+    def clear_staged_corporate_actions(self, trade_date: str) -> None:
+        self.sql.delete(
+            table='staged_corporate_actions',
+            filters={'trade_date': trade_date},
+        )
+
+    def is_corporate_action_applied(self, alpaca_ca_id: str) -> bool:
+        resp = self.sql.get(
+            table='applied_corporate_actions',
+            filters={'alpaca_ca_id': alpaca_ca_id},
+        )
+        return resp.status == 'success' and bool(resp.result)
+
+    def record_applied_corporate_action(
+        self,
+        alpaca_ca_id: str,
+        action_type: str,
+        stock_id: int,
+        process_date: str,
+    ) -> None:
+        self.sql.insert(
+            table='applied_corporate_actions',
+            items={
+                'alpaca_ca_id': alpaca_ca_id,
+                'action_type': action_type,
+                'stock_id': stock_id,
+                'process_date': process_date,
+                'datetime_applied': _iso8601(),
+            },
+        )
+
     INVALID_TICKER_TTL_DAYS = 7
 
     def is_ticker_invalid(self, ticker: str) -> bool:
@@ -1066,7 +1164,7 @@ class Backend:
         resp = self.sql.get(table='stock_picks', left_join=left_str, filters=filters, order={'change_percent': 'DESC', 'change_dollars': 'DESC'})
         return self._many_get(typeadapter=dtv.StockPicks, resp=resp)
 
-    def update_stock_pick(self, pick_id:int, current_value:Optional[float]=None, shares:Optional[float]=None, start_value:Optional[float]=None, status:Optional[str]=None, change_dollars:Optional[float]=None, change_percent:Optional[float]=None): #Update a single stock pick
+    def update_stock_pick(self, pick_id:int, current_value:Optional[float]=None, shares:Optional[float]=None, start_value:Optional[float]=None, status:Optional[str]=None, change_dollars:Optional[float]=None, change_percent:Optional[float]=None, event_label:Optional[str]=None, stock_id:Optional[int]=None): #Update a single stock pick
         """Update a stock pick
 
         Args:
@@ -1079,19 +1177,28 @@ class Backend:
             change_percent (float, optional): change_dollars in percent format.  Rounded to two decimal points.
         """
         
+        kwargs: dict = {'last_updated': _iso8601()}
+        if shares is not None:
+            kwargs['shares'] = shares
+        if start_value is not None:
+            kwargs['start_value'] = start_value
+        if current_value is not None:
+            kwargs['current_value'] = current_value
+        if status is not None:
+            kwargs['status'] = status
+        if change_dollars is not None:
+            kwargs['change_dollars'] = round(change_dollars, 2)
+        if change_percent is not None:
+            kwargs['change_percent'] = round(change_percent, 2)
+        if event_label is not None:
+            kwargs['event_label'] = event_label
+        if stock_id is not None:
+            kwargs['stock_id'] = stock_id
         self._update_single(
             table='stock_picks',
             id_column='pick_id',
             item_id=pick_id,
-            
-
-            shares = shares,
-            start_value = start_value,
-            current_value = current_value,
-            status = status,
-            change_dollars = round(change_dollars, 2) if change_dollars is not None else None,
-            change_percent = round(change_percent, 2) if change_percent is not None else None,
-            last_updated = _iso8601()
+            **kwargs,
         )
 
     def remove_stock_pick(self, pick_id:int):
@@ -1434,6 +1541,7 @@ class GameLogic: # Might move some of the control/running actions here
         # owner so `/game-list owner:@Bot` can filter to recurring series.
         # Defaults to each template's owner_id when unset (tests / non-Discord).
         self.recurring_game_owner_id: Optional[int] = None
+        self._latest_prices: dict[str, float] = {}
         if not self.alpaca.configured:
             self.logger.warning(
                 'Alpaca credentials missing; stock price updates will fail until '
@@ -1627,7 +1735,32 @@ class GameLogic: # Might move some of the control/running actions here
             if game.status == 'active' and game.end_date and game.end_date < today: #Game has ended
                 self.be.update_game(game_id=game.id, status='ended')
 
-    def update_stock_prices(self, game_id:Optional[int | str]=None, force:bool=False):
+    def _is_weekday_et(self) -> bool:
+        from helpers.market_schedule import is_weekday_et
+        return is_weekday_et()
+
+    def _should_poll_prices(self, force: bool, kind: Optional[str] = None) -> bool:
+        """Whether scheduled run should call Alpaca for prices."""
+        if force:
+            return True
+        if not self._is_weekday_et():
+            return False
+        if kind == 'pre_open':
+            return False
+        if kind == 'post_close':
+            return True
+        if kind == 'market' or kind is None:
+            return self._is_market_hours()
+        return False
+
+    def update_stock_prices(
+        self,
+        game_id: Optional[int | str] = None,
+        force: bool = False,
+        *,
+        kind: Optional[str] = None,
+        split_tickers: Optional[set[str]] = None,
+    ):
         """Fetch and store latest prices for every equity ticker in the database.
 
         Uses Alpaca IEX snapshots in rate-limited batches. Crypto is not included.
@@ -1640,22 +1773,43 @@ class GameLogic: # Might move some of the control/running actions here
         """
         #TODO Skip holidays
         #TODO allow after hours data to be added here as long as its tagged?
-        _ = game_id, force  # signature kept for update_all / force_update callers
+        _ = game_id
+
+        if not self._should_poll_prices(force, kind):
+            self.logger.info(
+                'Skipping Alpaca price poll (force=%s kind=%s)',
+                force,
+                kind,
+            )
+            return
 
         try:
             stocks = self.be.get_many_stocks()
         except LookupError:
             return  # No stocks
 
-        tickers = [stock.ticker for stock in stocks if stock.ticker]
+        tickers = [
+            stock.ticker
+            for stock in stocks
+            if stock.ticker and getattr(stock, 'trade_status', 'active') == 'active'
+        ]
         if not tickers:
             return
 
+        trade_date = self._today_et()
+        split_set = {t.upper() for t in (split_tickers or set())}
+
         try:
-            prices = self.alpaca.get_latest_prices(tickers)
+            prices = self.alpaca.get_latest_prices(
+                tickers,
+                split_tickers=split_set,
+                trade_date=trade_date if split_set else None,
+            )
         except Exception as e:
             self.logger.exception('Alpaca price fetch failed', exc_info=e)
             return
+
+        self._latest_prices = prices
 
         requested = {t.upper() for t in tickers}
         received = {t.upper() for t in prices}
@@ -1753,14 +1907,34 @@ class GameLogic: # Might move some of the control/running actions here
             for pick in picks:
                 assert isinstance(pick.id, int)
                 assert isinstance(pick.stock_id, int)
+                try:
+                    stock = self.be.get_stock(pick.stock_id)
+                except LookupError:
+                    continue
+                trade_status = getattr(stock, 'trade_status', 'active')
+                if trade_status in ('delisted', 'merged') and pick.status == 'owned':
+                    continue
+
+                if pick.status == 'pending_buy' and not force and not self._is_market_hours():
+                    continue
+
                 if not force and game.update_frequency == 'daily' and pick.status == 'owned' and pick.last_updated and datetime.strptime(str(pick.last_updated), "%Y-%m-%d %H:%M:%S") + timedelta(hours=8) > datetime.now():
                     self.logger.debug(f'Skipping stock pick: {pick.id} in game: {game_id} because update_frequency is daily, and it was last updated less than 8 hours ago')
                     continue # Skip picks with daily update frequency that have been updated in the last 12 hours
-                try:
-                    price = self.be.get_many_stock_prices(stock_id=int(pick.stock_id),datetime=_iso8601('date'))[0]
-                except LookupError as e:
-                    self.logger.exception(e) #TODO any change this causes more problems?
-                    continue
+
+                price_value: Optional[float] = self._latest_prices.get(stock.ticker.upper())
+                if price_value is None:
+                    try:
+                        price_row = self.be.get_many_stock_prices(stock_id=int(pick.stock_id), datetime=_iso8601('date'))[0]
+                        price_value = float(price_row.price)
+                    except LookupError as e:
+                        self.logger.debug('No price for pick %s (%s): %s', pick.id, stock.ticker, e)
+                        continue
+
+                class _PriceRow:
+                    def __init__(self, p: float):
+                        self.price = p
+                price = _PriceRow(price_value)
                 
                 #TODO check datetime here and decide if price should be used
                 buying_power = None
@@ -1920,22 +2094,74 @@ class GameLogic: # Might move some of the control/running actions here
                     snap.reason,
                 )
 
-    def update_all(self, game_id:Optional[int | str]=None, force:bool=False):
+    def update_all(
+        self,
+        game_id: Optional[int | str] = None,
+        force: bool = False,
+        *,
+        kind: Optional[str] = None,
+        apply_corporate_actions: bool = False,
+    ):
         """Run all update commands/logic for games
 
         Args:
-            game_id (Optional[int], optional): Game ID.  If blank, all active games will be updated.
-            force (bool, optional): Force update games that may not be updated due to frequency. Defaults to False.
+            game_id: Game ID. If blank, all active games will be updated.
+            force: Force update games that may not be updated due to frequency.
+            kind: Scheduled window — ``pre_open``, ``market``, ``post_close``.
+            apply_corporate_actions: Apply staged CA at market open.
         """
+        import time as _time
+        from helpers import corporate_actions as ca
+
+        start = _time.perf_counter()
+        trade_date = self._today_et()
+        split_tickers: set[str] = set()
+
         maybe_daily_backup(self.be.sql.db)
         maybe_hourly_backup(self.be.sql.db)
+
+        if kind == 'pre_open' and self._is_weekday_et():
+            ca.stage_corporate_actions(
+                self.be, self.alpaca, trade_date, force_if_empty=True
+            )
+
         if game_id is None:
             self.recurring_games()
-        self.update_game_statuses(game_id=game_id) # Update games statuses (start and stop)
-        self.update_stock_prices(game_id=game_id, force=force) # Update stock prices
-        self.update_stock_picks(game_id=game_id, force=force) # Handle pending stock picks
-        self.update_participants_and_games(game_id=game_id) # Update participants (set their total value, etc.)
+        self.update_game_statuses(game_id=game_id)
+
+        prices: dict[str, float] = {}
+        if apply_corporate_actions and self._is_weekday_et():
+            pre = ca.apply_staged_corporate_actions(
+                self.be, self, trade_date, prices, phase='pre_price'
+            )
+            split_tickers = pre.split_tickers
+
+        self.update_stock_prices(
+            game_id=game_id,
+            force=force,
+            kind=kind,
+            split_tickers=split_tickers,
+        )
+        prices = dict(self._latest_prices)
+
+        if apply_corporate_actions and self._is_weekday_et():
+            ca.apply_staged_corporate_actions(
+                self.be, self, trade_date, prices, phase='post_price'
+            )
+
+        self.update_stock_picks(game_id=game_id, force=force)
+        self.update_participants_and_games(game_id=game_id)
         self.record_days_in_first(game_id=game_id)
+
+        elapsed = _time.perf_counter() - start
+        self.logger.info(
+            'update_all completed in %.2fs (game_id=%s force=%s kind=%s apply_ca=%s)',
+            elapsed,
+            game_id,
+            force,
+            kind,
+            apply_corporate_actions,
+        )
             
     def find_stock(self, ticker:str) -> str: 
         """Find and add a US equity to the database via Alpaca market data.
@@ -2664,6 +2890,8 @@ class Frontend: # This will be where a bot (like discord) interacts
         player_id = self._participant_id(user_id=user_id, game_id=game_id) # If user doesn't exist in the game, error will be raised
         resolved_ticker = self.gl.find_stock(ticker=str(ticker))  # Ensures stock exists; returns DB ticker
         stock = self.be.get_stock(ticker_or_id=resolved_ticker)
+        if getattr(stock, 'trade_status', 'active') == 'delisted':
+            raise ValueError('Stock was delisted and can no longer be purchased.')
 
         # Draft mode: prevent duplicate tickers across players
         game = self.be.get_game(game_id=game_id)

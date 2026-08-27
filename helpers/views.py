@@ -469,6 +469,8 @@ class StockPortfolioImageGenerator:
                 'ticker_box': (58, 66, 95),   # muted indigo-slate (pairs with header blue)
                 'company_box': (79, 140, 165),  # steel teal (complements blurple summary)
                 'company_box_text': (22, 38, 48),  # dark slate — readable on teal box
+                'event_badge_bg': (185, 45, 45),
+                'event_badge_text': (255, 255, 255),
                 'border': (72, 75, 81),
                 'summary_bg': (88, 101, 242)  # Discord blurple for summary
             }
@@ -487,6 +489,8 @@ class StockPortfolioImageGenerator:
                 'ticker_box': (66, 103, 178),
                 'company_box': (91, 155, 175),
                 'company_box_text': (22, 38, 48),
+                'event_badge_bg': (185, 45, 45),
+                'event_badge_text': (255, 255, 255),
                 'border': (200, 200, 200),
                 'summary_bg': (66, 139, 202)
             }
@@ -768,6 +772,16 @@ class StockPortfolioImageGenerator:
         if pending:
             ticker = f"{ticker}*"
         company = self._portfolio_company_name(stock)
+        event_label = str(stock.get("event_label") or "").strip()
+
+        badge_w = 0
+        badge_label = ""
+        if event_label:
+            badge_label = self._truncate_to_width(
+                draw, event_label, self.fonts["text"], max(inner_width // 3, 80)
+            )
+            badge_w = self._text_size(draw, badge_label, self.fonts["text"])[0] + pad_x * 2
+            badge_w = min(max(badge_w, 60), inner_width // 2)
 
         if company:
             max_ticker_inner = min(120, inner_width // 3)
@@ -781,7 +795,8 @@ class StockPortfolioImageGenerator:
             ticker_w = max(min(ticker_w, max_ticker_inner), 52)
 
             company_left = title_left + ticker_w + gap
-            max_company_inner = max(title_right - company_left - pad_x * 2, 24)
+            reserved = badge_w + (gap if badge_w else 0)
+            max_company_inner = max(title_right - company_left - reserved - pad_x * 2, 24)
             company_label = self._truncate_to_width(
                 draw,
                 company,
@@ -811,6 +826,17 @@ class StockPortfolioImageGenerator:
                 self.colors["company_box_text"],
                 pad_x=pad_x,
             )
+            if badge_w:
+                badge_left = company_rect[2] + gap
+                badge_rect = [badge_left, bar_top, badge_left + badge_w, bar_top + bar_height]
+                draw.rectangle(badge_rect, fill=self.colors["event_badge_bg"])
+                self._draw_centered_text_in_rect(
+                    draw,
+                    badge_rect,
+                    badge_label,
+                    self.fonts["text"],
+                    self.colors["event_badge_text"],
+                )
             return
 
         ticker_label = self._truncate_to_width(

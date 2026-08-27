@@ -122,6 +122,7 @@ class Stock(BaseModel):
     ticker: str
     exchange: str
     company: str = Field(validation_alias=AliasChoices('company_name'))
+    trade_status: str = 'active'
 
     @field_validator('ticker', 'exchange')
     def string_exists(cls, value, field):
@@ -201,6 +202,7 @@ class StockPick(BaseModel):
     status: PickStatus = 'pending_buy'
     stock_ticker: Optional[str] = Field(default=None, validation_alias=AliasChoices('ticker')) # Allow ticker to be added in here.  Purely for ease of use
     company_name: Optional[str] = None
+    event_label: Optional[str] = None
     datetime_created: datetime # YYYY-MM-DD HH:MM:SS
     last_updated: Optional[datetime] = Field(default=None, validation_alias=AliasChoices('datetime_updated', 'last_updated')) # YYYY-MM-DD HH:MM:SS
 

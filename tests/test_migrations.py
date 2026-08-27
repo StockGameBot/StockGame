@@ -278,3 +278,33 @@ def test_ensure_database_migrates_0_2_6_to_0_2_7(db_path):
         assert "affiliation" in participant_cols
     finally:
         conn.close()
+
+
+def test_ensure_database_migrates_0_2_7_to_0_2_8(db_path):
+    create(db_path, upgrade=False)
+    sql = SqlHelper(db_path)
+    sql.update(
+        "database_info",
+        {"current_version": "0.2.7"},
+        filters={"database_name": db_path},
+    )
+
+    assert ensure_database(db_path) == "migrated"
+    info = sql.get("database_info", filters={"database_name": db_path})
+    assert info.result[0]["current_version"] == db_ver
+    conn = sqlite3.connect(db_path)
+    try:
+        stock_cols = {row[1] for row in conn.execute("PRAGMA table_info(stocks)")}
+        assert "trade_status" in stock_cols
+        pick_cols = {row[1] for row in conn.execute("PRAGMA table_info(stock_picks)")}
+        assert "event_label" in pick_cols
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert "staged_corporate_actions" in tables
+        assert "applied_corporate_actions" in tables
+    finally:
+        conn.close()
