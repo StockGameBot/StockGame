@@ -89,7 +89,7 @@ def test_get_latest_prices_logs_when_ticker_truly_unavailable(alpaca, mocker, ca
         "fetch_snapshots",
         side_effect=[
             {"GOOD": _snap(5.0)},  # batch: BAD missing
-            {},  # individual retry for BAD — still empty
+            {},  # individual retry for BAD - still empty
             {},
             {},
         ],

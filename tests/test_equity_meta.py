@@ -8,7 +8,7 @@ def test_autocomplete_label_omits_empty_or_ticker_name():
     assert autocomplete_label("RACE", "") == "RACE"
     assert autocomplete_label("RACE", "RACE") == "RACE"
     assert autocomplete_label("RACE", "  race  ") == "RACE"
-    assert autocomplete_label("RACE", "Ferrari N.V.") == "RACE — Ferrari N.V."
+    assert autocomplete_label("RACE", "Ferrari N.V.") == "RACE - Ferrari N.V."
 
 
 def test_lookup_company_name_uses_yahoo_when_alpaca_fails(mocker):

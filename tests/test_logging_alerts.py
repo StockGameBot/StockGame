@@ -169,7 +169,7 @@ def test_critical_dm_only_to_allowlisted_user(tmp_path):
             111111111111111111: stranger,
         }
     )
-    # Queue then flush — avoids same-thread run_coroutine_threadsafe races
+    # Queue then flush - avoids same-thread run_coroutine_threadsafe races
     bot.is_ready.return_value = False
     attach_critical_dm_bot(bot)
     handler = get_critical_handler()
@@ -339,9 +339,9 @@ def test_live_critical_dm_to_allowlisted_user(tmp_path):
     bot = commands.Bot(command_prefix="!", intents=intents)
     attach_critical_dm_bot(bot)
 
-    # Queue before ready — same path as production startup failures
+    # Queue before ready - same path as production startup failures
     live_message = (
-        "LIVE TEST CRITICAL from tests/test_logging_alerts.py — "
+        "LIVE TEST CRITICAL from tests/test_logging_alerts.py - "
         "safe to ignore; confirms Discord DM alerts work."
     )
     logging.getLogger("LiveCriticalDM").critical(live_message)

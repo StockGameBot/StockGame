@@ -21,7 +21,7 @@ def test_list_games_ranked_recurring_first_then_prominence_then_players(fe, mock
     fe.register(40)
     fe.join_game(40, near_id)
 
-    # Recurring (template_id set) with one player — must still beat non-recurring
+    # Recurring (template_id set) with one player - must still beat non-recurring
     fe.be.add_game_template(
         user_id=owner,
         name="RecurringTop",

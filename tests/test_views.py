@@ -41,13 +41,13 @@ def test_portfolio_money_left_uses_unfilled_pick_slots():
     pick_count = 10
     value_per_pick = start_money / pick_count
 
-    # Fully invested — $0 left even when stocks are up or down
+    # Fully invested - $0 left even when stocks are up or down
     assert start_money - 10 * value_per_pick == 0
 
     # One empty slot
     assert start_money - 9 * value_per_pick == value_per_pick
 
-    # Eight owned + one pending — one slot still open
+    # Eight owned + one pending - one slot still open
     assert start_money - (8 + 1) * value_per_pick == value_per_pick
 
 
