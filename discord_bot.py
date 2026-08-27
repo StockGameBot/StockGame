@@ -527,23 +527,6 @@ async def on_ready():
         await asyncio.to_thread(ca.repair_imcc_2026_08_27, fe.be, fe.gl.alpaca)
     except Exception:
         logger.exception('IMCC split repair skipped due to error')
-    try:
-        from helpers.repairs_0_2_8 import run_repairs_0_2_8
-        report = await asyncio.to_thread(run_repairs_0_2_8, fe.be, fe.gl.alpaca, force=True)
-        if report.untradeable.picks_removed:
-            logger.warning(
-                '0.2.8 repair removed %s untradeable pick(s): %s',
-                report.untradeable.picks_removed,
-                ', '.join(report.untradeable.tickers),
-            )
-        if report.stress_test_end_date_set:
-            logger.warning(
-                '0.2.8 repair set stress test game %s end_date to %s',
-                report.stress_test_game_id,
-                '2026-08-31',
-            )
-    except Exception:
-        logger.exception('0.2.8 startup repairs skipped due to error')
     # Keep the equity universe current without delaying command sync.
     asyncio.create_task(_seed_sp500_on_startup())
     try:
