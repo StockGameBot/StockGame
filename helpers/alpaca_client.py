@@ -57,16 +57,47 @@ def price_from_snapshot(snap: dict[str, Any]) -> Optional[float]:
     return None
 
 
-def trade_timestamp_from_snapshot(snap: dict[str, Any]) -> Optional[datetime]:
-    """Parse ``latestTrade.t`` from an Alpaca snapshot (UTC-aware)."""
-    trade = snap.get("latestTrade") or {}
-    raw = trade.get("t")
+def _parse_alpaca_trade_time(raw: Any) -> Optional[datetime]:
+    """Parse Alpaca ``latestTrade.t`` (unix seconds/ms or ISO-8601 UTC)."""
     if raw is None:
         return None
-    ts = float(raw)
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        if "." in text:
+            head, tail = text.split(".", 1)
+            tz_sep = max(tail.rfind("+"), tail.rfind("-"))
+            if tz_sep > 0:
+                frac, tz = tail[:tz_sep], tail[tz_sep:]
+            else:
+                frac, tz = tail, "+00:00"
+            digits = "".join(ch for ch in frac if ch.isdigit())
+            micro = (digits + "000000")[:6]
+            text = f"{head}.{micro}{tz}"
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            logger.debug("Unparseable Alpaca trade timestamp: %r", raw)
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        return dt.astimezone(ZoneInfo("UTC"))
+    try:
+        ts = float(raw)
+    except (TypeError, ValueError):
+        return None
     if ts > 1e12:
         ts /= 1000.0
     return datetime.fromtimestamp(ts, tz=ZoneInfo("UTC"))
+
+
+def trade_timestamp_from_snapshot(snap: dict[str, Any]) -> Optional[datetime]:
+    """Parse ``latestTrade.t`` from an Alpaca snapshot (UTC-aware)."""
+    trade = snap.get("latestTrade") or {}
+    return _parse_alpaca_trade_time(trade.get("t"))
 
 
 def is_post_open_trade(snap: dict[str, Any], trade_date: date) -> bool:

@@ -13,7 +13,11 @@ from helpers.market_schedule import (
     should_apply_corporate_actions,
     update_kind_for_time,
 )
-from helpers.alpaca_client import is_post_open_trade, to_db_ticker
+from helpers.alpaca_client import (
+    is_post_open_trade,
+    to_db_ticker,
+    trade_timestamp_from_snapshot,
+)
 
 
 def test_format_split_badge_imcc_reverse():
@@ -52,10 +56,24 @@ def test_update_kind_for_open_and_pre():
 
 def test_is_post_open_trade():
     trade_date = date(2026, 8, 27)
-    open_ms = int(datetime(2026, 8, 27, 9, 31, tzinfo=ZoneInfo("America/New_York")).timestamp() * 1000)
-    pre_ms = int(datetime(2026, 8, 27, 9, 0, tzinfo=ZoneInfo("America/New_York")).timestamp() * 1000)
+    ny = ZoneInfo("America/New_York")
+    open_ms = int(datetime(2026, 8, 27, 9, 31, tzinfo=ny).timestamp() * 1000)
+    pre_ms = int(datetime(2026, 8, 27, 9, 0, tzinfo=ny).timestamp() * 1000)
+    iso_open = "2026-08-27T13:31:00.123456789Z"
+    iso_pre = "2026-08-27T13:00:00.000000000Z"
     assert is_post_open_trade({"latestTrade": {"t": open_ms, "p": 3.39}}, trade_date)
     assert not is_post_open_trade({"latestTrade": {"t": pre_ms, "p": 0.11}}, trade_date)
+    assert is_post_open_trade({"latestTrade": {"t": iso_open, "p": 3.39}}, trade_date)
+    assert not is_post_open_trade({"latestTrade": {"t": iso_pre, "p": 0.11}}, trade_date)
+
+
+def test_trade_timestamp_from_iso_string():
+    ts = trade_timestamp_from_snapshot(
+        {"latestTrade": {"t": "2026-08-27T19:59:59.726877013Z", "p": 1.0}}
+    )
+    assert ts is not None
+    assert ts.year == 2026 and ts.month == 8 and ts.day == 27
+    assert ts.hour == 19 and ts.minute == 59
 
 
 def test_apply_reverse_split_updates_shares(be, mocker):
@@ -178,8 +196,14 @@ def test_repair_untradeable_falls_back_to_stale_iex(be, mocker):
         def fetch_buyable_db_tickers(self):
             return None
 
-        def is_stale_iex_trade(self, ticker, *, max_age_days=30.0):
-            return ticker.upper() == "ZEUS"
+        def fetch_snapshots(self, symbols):
+            out = {}
+            for sym in symbols:
+                if sym == "ZEUS":
+                    out[sym] = {"latestTrade": {"t": "2026-02-12T20:59:21.330558166Z", "p": 48.05}}
+                elif sym == "MSFT":
+                    out[sym] = {"latestTrade": {"t": "2026-08-27T19:59:59.726877013Z", "p": 420.0}}
+            return out
 
     report = repair_untradeable_equity_picks(be, FakeAlpaca(), force=True)
     assert report.picks_removed == 1
