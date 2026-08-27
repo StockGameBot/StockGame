@@ -29,7 +29,7 @@ _FUND_SHIFT = FUND_ICON_SLOT + FUND_ICON_GAP
 
 # (label, alignment, x, width) - compact column layout
 _COLUMNS = (
-    ("Fund", "left", FUND_TEXT_X, 134),
+    ("Fund", "left", FUND_TEXT_X, 140),
     ("Members", "right", 168 + _FUND_SHIFT, 44),
     ("$ Gain", "right", 220 + _FUND_SHIFT, 92),
     ("% Gain", "right", 320 + _FUND_SHIFT, 72),
