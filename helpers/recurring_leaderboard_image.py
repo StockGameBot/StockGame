@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 from PIL import Image, ImageDraw, ImageFont
 
 from helpers.views import LeaderboardImageGenerator
+from helpers.affiliations import load_affiliation_icon
 
 LEADERBOARD_N_CANDIDATES = (5, 10, 15, 20, 25, 30)
 DEFAULT_MAX_IMAGE_HEIGHT = 3500
@@ -36,6 +37,11 @@ FOOTER_BLOCK = 44
 
 IMAGE_WIDTH = 1100
 PANEL_WIDTH = 340
+AFFILIATION_ICON_HEIGHT = 26
+AFFILIATION_ICON_GAP = 6
+RANK_ICON_GAP = 6
+NAME_LINE_TOP = 9
+NAME_LINE_HEIGHT = 24
 
 _REGULAR_FONTS = (
     "arial.ttf",
@@ -260,7 +266,7 @@ class RecurringLeaderboardImageGenerator:
         y += HEADER_BLOCK
 
         for idx, player in enumerate(players):
-            y = self._draw_player_block(draw, player, idx, y)
+            y = self._draw_player_block(img, draw, player, idx, y, game_data)
 
         if created_at is not None:
             stamp = created_at.strftime("%Y-%m-%d %H:%M")
@@ -285,10 +291,12 @@ class RecurringLeaderboardImageGenerator:
 
     def _draw_player_block(
         self,
+        img: Image.Image,
         draw: ImageDraw.ImageDraw,
         player: Dict[str, Any],
         idx: int,
         y: int,
+        game_data: Dict[str, Any],
     ) -> int:
         picks = sort_picks_by_performance(list(player.get("picks") or []))
         block_h = player_block_height(
@@ -301,19 +309,31 @@ class RecurringLeaderboardImageGenerator:
 
         place = int(player.get("rank") or idx + 1)
         rank = f"{place}."
+        rank_x = 18
+        rank_w = self._width(rank, self.fonts["name"])
+        name_cy = y + NAME_LINE_TOP + NAME_LINE_HEIGHT // 2
         draw.text(
-            (18, y + 9),
+            (rank_x, name_cy),
             rank,
             fill=self._simple._get_rank_color(place - 1),
             font=self.fonts["name"],
+            anchor="lm",
         )
-        name_x = 18 + max(self._width(rank, self.fonts["name"]), 22) + 10
+        name_x = rank_x + max(rank_w, 22) + 10
+        if game_data.get("affiliations_enabled") and player.get("affiliation"):
+            icon = load_affiliation_icon(str(player["affiliation"]), AFFILIATION_ICON_HEIGHT)
+            if icon is not None:
+                icon_x = rank_x + rank_w + RANK_ICON_GAP
+                icon_y = int(name_cy - icon.height / 2)
+                img.paste(icon, (int(icon_x), icon_y), icon)
+                name_x = icon_x + icon.width + AFFILIATION_ICON_GAP
         name = str(player.get("display_name") or f"ID({player.get('user_id')})")
         draw.text(
-            (name_x, y + 9),
+            (name_x, name_cy),
             self._truncate(name, self.fonts["name"], self.panel_width - name_x - 18),
             fill=self.colors["text"],
             font=self.fonts["name"],
+            anchor="lm",
         )
 
         value = float(player.get("current_value") or 0)

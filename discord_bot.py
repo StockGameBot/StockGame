@@ -1,5 +1,4 @@
 # DISCORD Bot
-# SOME AI USED
 # Draft exclusivity is enforced by the backend; Discord exposes it during game creation.
 # TODO set up some sort of draft system for stocks
 
@@ -37,6 +36,8 @@ from helpers.leaderboard_push import (
 from helpers.recurring_top_roles import sync_recurring_top_roles, strip_template_top_roles
 from helpers.recurring_leaderboard_image import get_recurring_generator
 from helpers import game_invites as gi
+from helpers.affiliations import AFFILIATION_WARNING, format_dollar_gain, is_affiliations_enabled
+from helpers import affiliation_views as av
 import helpers.autocomplete as ac
 from helpers.logging_setup import (
     attach_critical_dm_bot,
@@ -64,13 +65,12 @@ except ValueError as exc:
     raise RuntimeError('OWNER must be a numeric Discord user ID.') from exc
     
 
-# Set up intents with all necessary permissions
-intents = discord.Intents.default()
-intents.message_content = True
-intents.messages = True
+# Slash commands + member lookups only; no message-content or presence intents.
+# Members Intent stays on for fetch_member(), but we do not cache every guild member in RAM.
+intents = discord.Intents.none()
 intents.guilds = True
 intents.members = True
-# intents.dm_messages = True # for invite user command
+member_cache_flags = discord.MemberCacheFlags.none()
 
 # Testing variables
 ephemeral_test = True # Set to False for testing, True for production
@@ -103,7 +103,7 @@ def has_permission(user: discord.Member) -> bool:
 
     Args:
         user: Guild member running the command.
-
+        
     Returns:
         True if the member passes the in-bot checks.
     """
@@ -111,7 +111,7 @@ def has_permission(user: discord.Member) -> bool:
         return True
     # Legacy role fallback — not the main reliance; Integrations should gate access.
     return any(role.id == dev_role_id for role in user.roles)
-
+    
 
 def is_moderator(interaction: discord.Interaction) -> bool:
     """Whether the caller may run privileged bot actions.
@@ -368,7 +368,11 @@ async def process_pending_user(interaction: discord.Interaction, game_id: str, p
     else:
         await interaction.edit_original_response(embed=embed, view=view)
 
-bot = commands.Bot(command_prefix="$", intents=intents)
+bot = commands.Bot(
+    command_prefix="$",
+    intents=intents,
+    member_cache_flags=member_cache_flags,
+)
 logger.info(f'Connecting with DB: {DB_NAME}')
 fe = Frontend(database_name=DB_NAME, owner_user_id=OWNER_ID, source='discord') # Frontend
 ac.init_autocomplete(fe)  # Inject the shared Frontend instance into autocomplete module
@@ -540,7 +544,7 @@ async def create_game_advanced(
         )
     except (InvalidDateFormatError, ValueError, TypeError) as exc:
         embed = discord.Embed(
-            title="Game Creation Failed",
+        title="Game Creation Failed",
             description=_game_creation_failure_description(exc),
             color=discord.Color.red(),
         )
@@ -1284,7 +1288,7 @@ async def create_game(interaction: discord.Interaction):
         initial_wizard_modal.on_submit = initial_wizard_callback
 
     # Set the button callback
-    game_creation_wizard_start.callback = game_creation_wizard_start_callback
+    game_creation_wizard_start.callback = game_creation_wizard_start_callback    
 
 
 class LeaderboardChannelSelect(discord.ui.View):
@@ -1388,6 +1392,7 @@ class LeaderboardChannelSelect(discord.ui.View):
     exclusive_picks="Enable exclusive picks: each stock can only be picked once (optional, default: False)",
     push_leaderboard="Post/edit a live leaderboard image in a channel (default: False)",
     auto_top_roles="Assign 1st/2nd/3rd roles when each game ends (default: False)",
+    affiliations_enabled="Enable hedge-fund team affiliations (default: False)",
 )
 async def create_recurring_game(
     interaction: discord.Interaction,
@@ -1403,9 +1408,10 @@ async def create_recurring_game(
     exclusive_picks: bool = False,
     push_leaderboard: bool = False,
     auto_top_roles: bool = False,
+    affiliations_enabled: bool = False,
 ):
         """Create a recurring game template"""
-
+        
         await interaction.response.defer(ephemeral=ephemeral_test)
 
         try:
@@ -1441,7 +1447,7 @@ async def create_recurring_game(
 
             user_id = interaction.user.id
             fe.register(user_id=user_id, username=interaction.user.display_name)
-
+            
             template_id = fe.be.add_game_template(
                 user_id=user_id,
                 name=name,
@@ -1458,21 +1464,23 @@ async def create_recurring_game(
             )
             if auto_top_roles:
                 fe.be.update_game_template(template_id=template_id, auto_top_roles=True)
-
+            if affiliations_enabled:
+                fe.be.update_game_template(template_id=template_id, affiliations_enabled=True)
+            
             embed = discord.Embed(
                 title="✅ Recurring Game Template Created!",
                 description=f"Successfully created recurring game template: **{name}**",
                 color=discord.Color.green(),
                 timestamp=datetime.now()
             )
-
+            
             embed.add_field(name="📅 Start Date", value=start_date, inline=True)
             embed.add_field(name="🔄 Recurring Every", value=f"{recurring_period} months", inline=True)
             embed.add_field(name="⏱️ Game Length", value=(f"{game_length} months" if game_length != 0 else "infinite"), inline=True)
             embed.add_field(name="💰 Starting Money", value=f"${starting_money:,.2f}", inline=True)
             embed.add_field(name="📊 Total Picks", value=str(total_picks), inline=True)
             embed.add_field(name="🔒 Private", value="Yes" if private_game else "No", inline=True)
-
+            
             if pick_date is not None:
                 if pick_date > 0:
                     pick_date_text = f"{pick_date} days before each game start"
@@ -1483,7 +1491,7 @@ async def create_recurring_game(
                 embed.add_field(name="📝 Pick Deadline", value=pick_date_text, inline=True)
             else:
                 embed.add_field(name="📝 Pick Deadline", value="None — buy anytime", inline=True)
-
+            
             embed.add_field(name="🎯 Exclusive Picks", value="Yes" if exclusive_picks else "No", inline=True)
             embed.add_field(name="🏷️ Updates", value="alpaca", inline=True)
             embed.add_field(name="⏰ Create in Advance", value=f"{create_days_in_advance} days", inline=True)
@@ -1497,16 +1505,21 @@ async def create_recurring_game(
                 value="Yes" if auto_top_roles else "No",
                 inline=True,
             )
+            embed.add_field(
+                name="🤝 Affiliations",
+                value="Yes" if affiliations_enabled else "No",
+                inline=True,
+            )
             if private_game:
                 embed.set_footer(
                     text=(
-                        f"Created by {interaction.user.display_name} · Template ID {template_id} · "
+                        f"Created by {interaction.user.display_name} | Template ID {template_id} | "
                         "Private: /join-game needs approval; owner /invite joins immediately"
                     )
                 )
             else:
-                embed.set_footer(text=f"Created by {interaction.user.display_name} · Template ID {template_id}")
-
+                embed.set_footer(text=f"Created by {interaction.user.display_name} | Template ID {template_id}")
+            
             await interaction.followup.send(embed=embed, ephemeral=ephemeral_test)
             if push_leaderboard:
                 await interaction.followup.send(
@@ -1558,8 +1571,8 @@ async def join_game(
         except LookupError:
             force_active = False
         fe.join_game(
-            user_id=interaction.user.id,
-            game_id=game_id,
+            user_id=interaction.user.id, 
+            game_id=game_id, 
             force_active=force_active,
         )
 
@@ -1610,6 +1623,18 @@ async def join_game(
         title = "Game Join Failed"
 
     await interaction.response.send_message(embed=simple_embed(status = status, title = title, desc = description), ephemeral=ephemeral_test)
+    if status == 'success' and participant_status == 'active':
+        try:
+            joined_game = fe.be.get_game(game_id)
+            await av.maybe_send_affiliation_prompt(
+                interaction,
+                fe,
+                joined_game,
+                participant_status=participant_status,
+                ephemeral=ephemeral_test,
+            )
+        except LookupError:
+            pass
 
 @bot.tree.command(name="delete-game", description="Delete a game (Owner/Admin) - with confirmation")
 @app_commands.autocomplete(game_id=ac.owner_games_autocomplete)
@@ -2090,6 +2115,20 @@ class RecurringTemplateManager(discord.ui.View):
             auto_roles_btn = discord.ui.Button(label="Enable Auto Roles", style=discord.ButtonStyle.success)
             auto_roles_btn.callback = self._enable_auto_roles  # type: ignore[method-assign]
 
+        affiliations_on = bool(self.templates and self.templates[self.index].affiliations_enabled)
+        if affiliations_on:
+            affiliations_btn = discord.ui.Button(
+                label="Disable Affiliations",
+                style=discord.ButtonStyle.secondary,
+            )
+            affiliations_btn.callback = self._disable_affiliations  # type: ignore[method-assign]
+        else:
+            affiliations_btn = discord.ui.Button(
+                label="Enable Affiliations",
+                style=discord.ButtonStyle.success,
+            )
+            affiliations_btn.callback = self._enable_affiliations  # type: ignore[method-assign]
+
         prev_btn.callback = self._previous  # type: ignore[method-assign]
         next_btn.callback = self._next  # type: ignore[method-assign]
         delete_btn.callback = self._ask_delete  # type: ignore[method-assign]
@@ -2100,6 +2139,7 @@ class RecurringTemplateManager(discord.ui.View):
         if channel_btn is not None:
             self.add_item(channel_btn)
         self.add_item(auto_roles_btn)
+        self.add_item(affiliations_btn)
         self.add_item(delete_btn)
 
     def _pick_deadline_text(self, template) -> str:
@@ -2149,6 +2189,8 @@ class RecurringTemplateManager(discord.ui.View):
         embed.add_field(name="📣 Push Leaderboard", value=push_txt, inline=False)
         roles_txt = "On" if template.auto_top_roles else "Off"
         embed.add_field(name="🏆 Auto Top Roles", value=roles_txt, inline=True)
+        aff_txt = "On" if template.affiliations_enabled else "Off"
+        embed.add_field(name="🤝 Affiliations", value=aff_txt, inline=True)
         if self.interaction.user.id != template.owner_id:
             embed.add_field(name="👤 Owner", value=f"<@{template.owner_id}>", inline=True)
         embed.set_footer(text=f"Template ID: {template.id}")
@@ -2337,6 +2379,36 @@ class RecurringTemplateManager(discord.ui.View):
             logger.exception("disable auto roles failed | template_id=%s", template.id, exc_info=exc)
             await interaction.response.send_message("❌ Failed to disable auto top roles.", ephemeral=True)
 
+    async def _enable_affiliations(self, interaction: discord.Interaction) -> None:
+        template = self.templates[self.index]
+        try:
+            fe.be.update_game_template(template_id=template.id, affiliations_enabled=True)
+            self.templates[self.index] = fe.be.get_game_template(template.id)
+            self._sync_buttons()
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
+            await interaction.followup.send(
+                f"🤝 Affiliations enabled for **{template.name}** (applies to all active games).",
+                ephemeral=True,
+            )
+        except Exception as exc:
+            logger.exception("enable affiliations failed | template_id=%s", template.id, exc_info=exc)
+            await interaction.response.send_message("❌ Failed to enable affiliations.", ephemeral=True)
+
+    async def _disable_affiliations(self, interaction: discord.Interaction) -> None:
+        template = self.templates[self.index]
+        try:
+            fe.be.update_game_template(template_id=template.id, affiliations_enabled=False)
+            self.templates[self.index] = fe.be.get_game_template(template.id)
+            self._sync_buttons()
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
+            await interaction.followup.send(
+                f"🤝 Affiliations disabled for **{template.name}** (applies to all active games).",
+                ephemeral=True,
+            )
+        except Exception as exc:
+            logger.exception("disable affiliations failed | template_id=%s", template.id, exc_info=exc)
+            await interaction.response.send_message("❌ Failed to disable affiliations.", ephemeral=True)
+
     async def _set_channel(self, interaction: discord.Interaction) -> None:
         template = self.templates[self.index]
         await interaction.response.send_message(
@@ -2519,87 +2591,197 @@ async def update(
 
 # STOCK RELATED
 
-@bot.tree.command(name="buy-stock", description="Buy a stock in a game")
-@app_commands.autocomplete(game_id=ac.all_games_autocomplete, ticker=ac.buy_ticker_autocomplete)
+def _collect_buy_tickers(*values: str | None) -> list[str]:
+    """Normalize and dedupe ticker inputs while preserving order."""
+    tickers: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value is None:
+            continue
+        raw = value.strip().upper()
+        if not raw or raw in seen:
+            continue
+        seen.add(raw)
+        tickers.append(raw)
+    return tickers
+
+
+def _buy_stock_outcome(
+    user_id: int,
+    game_id: str,
+    ticker: str,
+) -> tuple[str, str, str]:
+    """Attempt one stock purchase and return ``(status, title, description)``."""
+    status = "failed"
+    title = "Stock Purchase Failed"
+    description = "An unexpected error occurred while trying to buy the stock. Please try again or contact a moderator."
+    try:
+        fe.buy_stock(user_id=user_id, game_id=game_id, ticker=ticker)
+        remaining, total = fe.pick_capacity(user_id, game_id)
+        return (
+            "success",
+            "Stock Purchased",
+            f"Added {ticker} to game #{game_id}. {remaining} of {total} picks remaining.",
+        )
+    except ValueError as exc:
+        if "Invalid Ticker, too long!" in str(exc):
+            description = f"The ticker {ticker} is not valid!"
+        elif "Stock is not tradeable" in str(exc):
+            description = (
+                f"The ticker {ticker} is not tradeable. "
+                "This can occur when a stock is private or has been delisted."
+            )
+        elif "Unable to find stock" in str(exc) or "Failed to add `ticker`" in str(exc):
+            description = (
+                f"The ticker {ticker} was not found. "
+                "Double check your spelling and try again!"
+            )
+        else:
+            logger.exception(
+                "Uncaught value error user: %s tried to buy stock with ticker: %s",
+                user_id,
+                ticker,
+                exc_info=exc,
+            )
+            description = "An error ocurred while finding your stock."
+    except LookupError:
+        description = f"No game with ID {game_id} found."
+    except NotAllowedError as exc:
+        if exc.reason == "Not active":
+            try:
+                participant = fe.be.get_many_participants(user_id=user_id, game_id=game_id)[0]
+                if participant.status == "pending":
+                    description = (
+                        "Your request to join this private game is still awaiting owner approval."
+                    )
+                else:
+                    description = f"You are not currently allowed to buy stocks in game #{game_id}."
+            except (LookupError, IndexError):
+                description = f"You are not currently allowed to buy stocks in game #{game_id}."
+        elif exc.reason == "Maximum picks reached":
+            title = "Game Pick Limit Reached"
+            description = (
+                "You have reached the maximum number of picks for this game.\n"
+                "To add another stock, you need to remove one of your current picks."
+            )
+        elif exc.reason == "Past pick_date":
+            description = "The pick date for this game has passed, so you can no longer pick stocks."
+    except AlreadyExistsError:
+        description = f"You already own {ticker} in this game!"
+    except DoesntExistError as exc:
+        if exc.table == "game_participants":
+            description = f"You are not in the game: {game_id}."
+    except RuntimeError as exc:
+        if "temporarily unavailable" in str(exc).lower():
+            description = "Stock lookup is temporarily unavailable. Try again in a moment."
+        else:
+            logger.exception(
+                "User: %s tried to buy the stock: %s in game: %s. Error: %s",
+                user_id,
+                ticker,
+                game_id,
+                exc,
+            )
+    except Exception as exc:
+        logger.exception(
+            "User: %s tried to buy the stock: %s in game: %s. Error: %s",
+            user_id,
+            ticker,
+            game_id,
+            exc,
+        )
+    return status, title, description
+
+
+@bot.tree.command(name="buy-stock", description="Buy up to 10 stocks in a game")
+@app_commands.autocomplete(
+    game_id=ac.all_games_autocomplete,
+    ticker=ac.buy_ticker_autocomplete,
+    ticker_2=ac.buy_ticker_autocomplete,
+    ticker_3=ac.buy_ticker_autocomplete,
+    ticker_4=ac.buy_ticker_autocomplete,
+    ticker_5=ac.buy_ticker_autocomplete,
+    ticker_6=ac.buy_ticker_autocomplete,
+    ticker_7=ac.buy_ticker_autocomplete,
+    ticker_8=ac.buy_ticker_autocomplete,
+    ticker_9=ac.buy_ticker_autocomplete,
+    ticker_10=ac.buy_ticker_autocomplete,
+)
 @app_commands.describe(
     game_id="ID of the game",
-    ticker="Stock ticker symbol"
+    ticker="First stock ticker symbol",
+    ticker_2="Optional second ticker",
+    ticker_3="Optional third ticker",
+    ticker_4="Optional fourth ticker",
+    ticker_5="Optional fifth ticker",
+    ticker_6="Optional sixth ticker",
+    ticker_7="Optional seventh ticker",
+    ticker_8="Optional eighth ticker",
+    ticker_9="Optional ninth ticker",
+    ticker_10="Optional tenth ticker",
 )
 async def buy_stock(
     interaction: discord.Interaction, 
     game_id: str, 
-    ticker: str
+    ticker: str,
+    ticker_2: str | None = None,
+    ticker_3: str | None = None,
+    ticker_4: str | None = None,
+    ticker_5: str | None = None,
+    ticker_6: str | None = None,
+    ticker_7: str | None = None,
+    ticker_8: str | None = None,
+    ticker_9: str | None = None,
+    ticker_10: str | None = None,
 ):
-    await interaction.response.defer(ephemeral=ephemeral_test) # Defer the response to allow time for the update
-    status = 'failed' # Start with failed status
-    title = 'Stock Purchase Failed'
-    try:
-        ticker = ticker.upper()
-        await asyncio.to_thread(
-            fe.buy_stock,
-            user_id=interaction.user.id,
-            game_id=game_id,
-            ticker=ticker,
-        )
+    await interaction.response.defer(ephemeral=ephemeral_test)
+    tickers = _collect_buy_tickers(
+        ticker,
+        ticker_2,
+        ticker_3,
+        ticker_4,
+        ticker_5,
+        ticker_6,
+        ticker_7,
+        ticker_8,
+        ticker_9,
+        ticker_10,
+    )
+
+    if len(tickers) == 1:
+        single_ticker = tickers[0]
+
+        def run_single() -> tuple[str, str, str]:
+            return _buy_stock_outcome(interaction.user.id, game_id, single_ticker)
+
+        status, title, description = await asyncio.to_thread(run_single)
+    else:
+        results: list[tuple[str, str, str, str]] = []
+
+        def run_batch() -> list[tuple[str, str, str, str]]:
+            batch: list[tuple[str, str, str, str]] = []
+            for symbol in tickers:
+                outcome = _buy_stock_outcome(interaction.user.id, game_id, symbol)
+                batch.append((symbol, *outcome))
+            return batch
+
+        results = await asyncio.to_thread(run_batch)
+        lines: list[str] = []
+        any_success = False
+        for symbol, item_status, _item_title, item_desc in results:
+            prefix = "✅" if item_status == "success" else "❌"
+            lines.append(f"{prefix} **{symbol}**: {item_desc}")
+            any_success = any_success or item_status == "success"
         remaining, total = fe.pick_capacity(interaction.user.id, game_id)
-        title = 'Stock Purchased'
-        description = f'Added {ticker} to game #{game_id}. {remaining} of {total} picks remaining.'
-        status = 'success'
+        lines.append(f"\n{remaining} of {total} picks remaining.")
+        status = "success" if any_success else "failed"
+        title = "Stock Purchases"
+        description = "\n".join(lines)
 
-    except ValueError as exc:
-        if 'Invalid Ticker, too long!' in str(exc):
-            description = f'The ticker {ticker} is not valid!'
-        
-        elif 'Stock is not tradeable' in str(exc):
-            description = f'The ticker {ticker} is not tradeable.  This can occur when a stock is private or has been delisted.'
-            
-        elif 'Unable to find stock' in str(exc) or 'Failed to add `ticker`' in str(exc):
-            description = f'The ticker {ticker} was not found.  Double check your spelling and try again!'
-        
-        else:
-            logger.exception(f'Uncaught value error user: {interaction.user.id} tried to buy stock with ticker: {ticker}', exc_info=exc)
-            description = 'An error ocurred while finding your stock.'
-    
-    except LookupError:
-        description = f'No game with ID {game_id} found.'
-    
-    except NotAllowedError as exc: # REASONS ARE NOW IN THE DOCSTRING OF buy_stock!!
-        if exc.reason == 'Not active':
-            try:
-                participant = fe.be.get_many_participants(user_id=interaction.user.id, game_id=game_id)[0]
-                if participant.status == 'pending':
-                    description = 'Your request to join this private game is still awaiting owner approval.'
-                else:
-                    description = f'You are not currently allowed to buy stocks in game #{game_id}.'
-            except (LookupError, IndexError):
-                description = f'You are not currently allowed to buy stocks in game #{game_id}.'
-        
-        elif exc.reason == 'Maximum picks reached':
-            title="Game Pick Limit Reached"
-            description = f'You have reached the maximum number of picks for this game.\nTo add another stock, you need to remove one of your current picks.'
-        
-        elif exc.reason == 'Past pick_date':
-            description = f'The pick date for this game has passed, so you can no longer pick stocks.'
-    
-    except AlreadyExistsError as exc:
-        description = f'You already own {ticker} in this game!'
-        
-    except DoesntExistError as exc: # Player isnt in the game at all
-        if exc.table == 'game_participants':
-            description = f'You are not in the game: {game_id}.'
-
-    except Exception as e: # Other unexpeted errors
-        logger.exception(f'User: {interaction.user.id} tried to buy the stock: {ticker} in game: {game_id}. Error: {e}')
-        description='An unexpected error occurred while trying to buy the stock. Please try again or contact a moderator.'
-            
     await interaction.followup.send(
-        embed=simple_embed( # This just creates the status message
-            status = status,
-            title = title,
-            desc = description
-            ), 
-        ephemeral=ephemeral_test
-        )
+        embed=simple_embed(status=status, title=title, desc=description),
+        ephemeral=ephemeral_test,
+    )
 
 
 # Selling is not implemented yet — keep the command commented for later use.
@@ -2679,8 +2861,201 @@ async def remove_stock(interaction: discord.Interaction, game_id: str, ticker: s
 # TODO Add buttons for buying stocks?
 # TODO Add buttons for buying/selling stocks?  # selling not implemented yet
 
+
+def _bot_can_share_in_channel(
+    channel: discord.abc.GuildChannel,
+    me: discord.Member,
+) -> bool:
+    """Return True if the bot can post an image + text in ``channel``."""
+    perms = channel.permissions_for(me)
+    return bool(
+        perms.view_channel
+        and perms.send_messages
+        and perms.attach_files
+    )
+
+
+def _share_attribution_line(
+    user: discord.User | discord.Member,
+    *,
+    context: str,
+) -> str:
+    return f"Shared by {user.mention} | {context}"
+
+
+async def _post_shared_image(
+    interaction: discord.Interaction,
+    *,
+    png_bytes: bytes,
+    filename: str,
+    context: str,
+) -> None:
+    """Post an image and attribution line publicly in the command channel."""
+    channel = interaction.channel
+    if not isinstance(channel, discord.TextChannel):
+        await interaction.followup.send(
+            embed=simple_embed(
+                status="failed",
+                title="Cannot share here",
+                desc="Sharing is only available in a server text channel.",
+            ),
+            ephemeral=True,
+        )
+        return
+
+    guild = channel.guild
+    me = guild.me if guild else None
+    if me is None or not _bot_can_share_in_channel(channel, me):
+        logger.warning(
+            "Share denied in channel %s for user %s (%s): missing view/send/attach permissions",
+            channel.id,
+            interaction.user.id,
+            context,
+        )
+        await interaction.followup.send(
+            embed=simple_embed(
+                status="failed",
+                title="Cannot share here",
+                desc=(
+                    "I don't have permission to post images in this channel. "
+                    "Ask a moderator to allow **View Channel**, **Send Messages**, "
+                    "and **Attach Files** for me."
+                ),
+            ),
+            ephemeral=True,
+        )
+        return
+
+    content = _share_attribution_line(interaction.user, context=context)
+    file = discord.File(io.BytesIO(png_bytes), filename=filename)
+    try:
+        await channel.send(content=content, file=file)
+    except discord.HTTPException as exc:
+        logger.warning(
+            "Share failed in channel %s for user %s (%s): %s",
+            channel.id,
+            interaction.user.id,
+            context,
+            exc,
+        )
+        await interaction.followup.send(
+            embed=simple_embed(
+                status="failed",
+                title="Share failed",
+                desc="Something went wrong while posting to the channel. Try again in a moment.",
+            ),
+            ephemeral=True,
+        )
+        return
+
+
+async def _disable_expired_view(
+    view: discord.ui.View,
+    interaction: discord.Interaction, 
+) -> None:
+    """Gray out view controls when the interaction window closes."""
+    for item in view.children:
+        if isinstance(item, (discord.ui.Button, discord.ui.Select)):
+            item.disabled = True
+    try:
+        message = await interaction.original_response()
+        await message.edit(view=view)
+    except discord.HTTPException:
+        pass
+
+
+class PortfolioShareView(discord.ui.View):
+    """Ephemeral portfolio viewer with a public Share action."""
+
+    def __init__(
+        self,
+        interaction: discord.Interaction,
+        *,
+        png_bytes: bytes,
+        filename: str,
+        context: str,
+        game_id: str | None = None,
+        show_affiliation_button: bool = False,
+    ):
+        super().__init__(timeout=600)
+        self.interaction = interaction
+        self.png_bytes = png_bytes
+        self.filename = filename
+        self.context = context
+        self.game_id = game_id
+        self.show_affiliation_button = show_affiliation_button
+        self.affiliation_chosen = False
+        self._sync_buttons()
+
+    def _sync_buttons(self) -> None:
+        self.clear_items()
+        if self.show_affiliation_button and self.game_id and not self.affiliation_chosen:
+            aff_btn = discord.ui.Button(
+                label="Choose Affiliation",
+                style=discord.ButtonStyle.primary,
+            )
+            aff_btn.callback = self._choose_affiliation  # type: ignore[method-assign]
+            self.add_item(aff_btn)
+        share = discord.ui.Button(label="Share", style=discord.ButtonStyle.success)
+        share.callback = self._share  # type: ignore[method-assign]
+        self.add_item(share)
+
+    async def _choose_affiliation(self, interaction: discord.Interaction) -> None:
+        if self.game_id is None:
+            return
+        view = av.AffiliationSelectView(
+            fe,
+            user_id=interaction.user.id,
+            game_id=self.game_id,
+            on_chosen=self._on_affiliation_chosen,
+        )
+        await interaction.response.send_message(
+            content=f"Choose a hedge-fund affiliation for game **#{self.game_id}**:\n\n{AFFILIATION_WARNING}",
+            view=view,
+            ephemeral=True,
+        )
+
+    async def _on_affiliation_chosen(
+        self,
+        interaction: discord.Interaction,
+        _affiliation: str | None,
+    ) -> None:
+        self.affiliation_chosen = True
+        self._sync_buttons()
+        try:
+            message = await self.interaction.original_response()
+            await message.edit(view=self)
+        except discord.HTTPException:
+            pass
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.interaction.user.id:
+            return True
+        await interaction.response.send_message(
+            "Only you can use these portfolio controls.",
+            ephemeral=True,
+        )
+        return False
+
+    async def _share(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await _post_shared_image(
+            interaction,
+            png_bytes=self.png_bytes,
+            filename=self.filename,
+            context=self.context,
+        )
+
+    async def on_timeout(self) -> None:
+        await _disable_expired_view(self, self.interaction)
+
+
 class UserLeaderboardView(discord.ui.View):
     """Browse games with outer controls and rank pages with inner controls."""
+
+    _ROW_PAGES = 0
+    _ROW_GAMES = 1
+    _ROW_ACTIONS = 2
 
     def __init__(
         self,
@@ -2688,6 +3063,8 @@ class UserLeaderboardView(discord.ui.View):
         games: list[dict],
         *,
         show_game_controls: bool = True,
+        show_affiliation_button: bool = False,
+        affiliation_game_id: str | None = None,
     ):
         super().__init__(timeout=600)
         self.interaction = interaction
@@ -2695,6 +3072,9 @@ class UserLeaderboardView(discord.ui.View):
         self.game_index = 0
         self.rank_page_index = 0
         self.show_game_controls = show_game_controls
+        self.show_affiliation_button = show_affiliation_button
+        self.affiliation_game_id = affiliation_game_id
+        self.affiliation_chosen_games: set[str] = set()
         self._sync_buttons()
 
     @property
@@ -2709,41 +3089,141 @@ class UserLeaderboardView(discord.ui.View):
     def rank_page_count(self) -> int:
         return self.current_game["rank_page_count"]
 
+    def _affiliation_button_for_current_game(self) -> tuple[bool, str | None]:
+        game = self.current_game.get("game")
+        if game is None:
+            return False, None
+        game_id = getattr(game, "id", None)
+        if game_id is None:
+            return False, None
+        game_key = str(game_id)
+        if game_key in self.affiliation_chosen_games:
+            return False, None
+        participant = _participant_for_game(self.interaction.user.id, game_key)
+        show = av.show_affiliation_button(fe, game, participant)
+        return show, game_key if show else None
+
     def _sync_buttons(self) -> None:
         self.clear_items()
+
+        on_first_page = self.rank_page_index <= 0
+        on_last_page = self.rank_page_index >= self.rank_page_count - 1
+
+        first_page = discord.ui.Button(
+            label="First page",
+            style=discord.ButtonStyle.secondary,
+            disabled=on_first_page,
+            row=self._ROW_PAGES,
+        )
+        previous_page = discord.ui.Button(
+            label="Previous page",
+            style=discord.ButtonStyle.secondary,
+            disabled=on_first_page,
+            row=self._ROW_PAGES,
+        )
+        next_page = discord.ui.Button(
+            label="Next page",
+            style=discord.ButtonStyle.secondary,
+            disabled=on_last_page,
+            row=self._ROW_PAGES,
+        )
+        last_page = discord.ui.Button(
+            label="Last page",
+            style=discord.ButtonStyle.secondary,
+            disabled=on_last_page,
+            row=self._ROW_PAGES,
+        )
+        first_page.callback = self._first_rank_page  # type: ignore[method-assign]
+        previous_page.callback = self._previous_rank_page  # type: ignore[method-assign]
+        next_page.callback = self._next_rank_page  # type: ignore[method-assign]
+        last_page.callback = self._last_rank_page  # type: ignore[method-assign]
+        self.add_item(first_page)
+        self.add_item(previous_page)
+        self.add_item(next_page)
+        self.add_item(last_page)
 
         if self.show_game_controls:
             previous_game = discord.ui.Button(
                 label="Previous game",
                 style=discord.ButtonStyle.blurple,
                 disabled=self.game_index <= 0,
+                row=self._ROW_GAMES,
             )
-            previous_game.callback = self._previous_game  # type: ignore[method-assign]
-            self.add_item(previous_game)
-
-        previous_page = discord.ui.Button(
-            label="Previous page",
-            style=discord.ButtonStyle.secondary,
-            disabled=self.rank_page_index <= 0,
-        )
-        next_page = discord.ui.Button(
-            label="Next page",
-            style=discord.ButtonStyle.secondary,
-            disabled=self.rank_page_index >= self.rank_page_count - 1,
-        )
-        previous_page.callback = self._previous_rank_page  # type: ignore[method-assign]
-        next_page.callback = self._next_rank_page  # type: ignore[method-assign]
-        self.add_item(previous_page)
-        self.add_item(next_page)
-
-        if self.show_game_controls:
             next_game = discord.ui.Button(
                 label="Next game",
-            style=discord.ButtonStyle.blurple,
+                style=discord.ButtonStyle.blurple,
                 disabled=self.game_index >= len(self.games) - 1,
+                row=self._ROW_GAMES,
             )
+            previous_game.callback = self._previous_game  # type: ignore[method-assign]
             next_game.callback = self._next_game  # type: ignore[method-assign]
+            self.add_item(previous_game)
             self.add_item(next_game)
+
+        show_aff, aff_game_id = self._affiliation_button_for_current_game()
+        if show_aff and aff_game_id:
+            self.affiliation_game_id = aff_game_id
+            aff_btn = discord.ui.Button(
+                label="Choose Affiliation",
+                style=discord.ButtonStyle.primary,
+                row=self._ROW_ACTIONS,
+            )
+            aff_btn.callback = self._choose_affiliation  # type: ignore[method-assign]
+            self.add_item(aff_btn)
+
+        share = discord.ui.Button(
+            label="Share",
+            style=discord.ButtonStyle.success,
+            row=self._ROW_ACTIONS,
+        )
+        share.callback = self._share  # type: ignore[method-assign]
+        self.add_item(share)
+
+    async def _choose_affiliation(self, interaction: discord.Interaction) -> None:
+        if self.affiliation_game_id is None:
+            return
+        view = av.AffiliationSelectView(
+            fe,
+            user_id=interaction.user.id,
+            game_id=self.affiliation_game_id,
+            on_chosen=self._on_affiliation_chosen,
+        )
+        await interaction.response.send_message(
+            content=(
+                f"Choose a hedge-fund affiliation for game **#{self.affiliation_game_id}**:\n\n"
+                f"{AFFILIATION_WARNING}"
+            ),
+            view=view,
+            ephemeral=True,
+        )
+
+    async def _on_affiliation_chosen(
+        self,
+        interaction: discord.Interaction,
+        _affiliation: str | None,
+    ) -> None:
+        if self.affiliation_game_id:
+            self.affiliation_chosen_games.add(self.affiliation_game_id)
+        self._sync_buttons()
+        try:
+            message = await self.interaction.original_response()
+            await message.edit(view=self)
+        except discord.HTTPException:
+            pass
+
+    def _share_context(self) -> str:
+        return f"Leaderboard | {self.current_game.get('title', 'Game')}"
+
+    async def _share(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self.prepare()
+        page = self.rank_pages[self.rank_page_index]
+        await _post_shared_image(
+            interaction,
+            png_bytes=page["png"],
+            filename=page["filename"],
+            context=self._share_context(),
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.interaction.user.id:
@@ -2808,6 +3288,10 @@ class UserLeaderboardView(discord.ui.View):
         self.rank_page_index = 0
         await self._edit(interaction)
 
+    async def _first_rank_page(self, interaction: discord.Interaction) -> None:
+        self.rank_page_index = 0
+        await self._edit(interaction)
+
     async def _previous_rank_page(self, interaction: discord.Interaction) -> None:
         self.rank_page_index = max(0, self.rank_page_index - 1)
         await self._edit(interaction)
@@ -2816,12 +3300,12 @@ class UserLeaderboardView(discord.ui.View):
         self.rank_page_index = min(self.rank_page_count - 1, self.rank_page_index + 1)
         await self._edit(interaction)
 
+    async def _last_rank_page(self, interaction: discord.Interaction) -> None:
+        self.rank_page_index = max(0, self.rank_page_count - 1)
+        await self._edit(interaction)
+
     async def on_timeout(self) -> None:
-        try:
-            message = await self.interaction.original_response()
-            await message.edit(view=None)
-        except discord.HTTPException:
-            pass
+        await _disable_expired_view(self, self.interaction)
 
 
 async def resolve_player_name(user_id: int, guild: discord.Guild | None) -> str:
@@ -2922,10 +3406,12 @@ async def _build_rank_page(
         }
         if recurring:
             row["days_in_first"] = getattr(entry, "days_in_first", 0) or 0
+            row["affiliation"] = getattr(entry, "affiliation", None)
             row["picks"] = (
                 await asyncio.to_thread(collect_player_picks, fe, game.id, entry.user_id) or []
             )
         processed.append(row)
+    affiliations_on = recurring and is_affiliations_enabled(fe.be, game)
     game_data = {
         "name": game.name,
         "id": game.id,
@@ -2934,6 +3420,7 @@ async def _build_rank_page(
         "start_date": str(game.start_date),
         "end_date": str(game.end_date) if game.end_date else None,
         "status": game.status,
+        "affiliations_enabled": affiliations_on,
     }
     png = await asyncio.to_thread(
         _cached_game_info_leaderboard_png,
@@ -3070,7 +3557,7 @@ def _game_info_embed(
         name="Performance",
         value=(
             f"Combined value: ${aggregate:,.2f}\n"
-            f"Change: ${dollars:+,.2f}\n"
+            f"Change: {format_dollar_gain(dollars)}\n"
             f"Change: {percent:+.2f}%"
         ),
         inline=True,
@@ -3100,6 +3587,28 @@ def _user_can_view_game_info(game, user_id: int) -> bool:
     except LookupError:
         return False
     return any(player.status == "active" for player in participants)
+
+
+def _user_can_view_portfolio(
+    game,
+    viewer_user_id: int,
+    subject_user_id: int,
+) -> tuple[bool, str | None]:
+    """Return whether ``viewer_user_id`` may view ``subject_user_id``'s portfolio."""
+    if subject_user_id == viewer_user_id:
+        return True, None
+    if game.private_game:
+        return False, "You can only view other players' portfolios in public games."
+    try:
+        participants = fe.be.get_many_participants(
+            game_id=game.id,
+            user_id=subject_user_id,
+        )
+    except LookupError:
+        return False, "That user is not participating in this game."
+    if participants[0].status != "active":
+        return False, "That user is not an active participant in this game."
+    return True, None
 
 
 def _leaderboard_browse_games(user_id: int) -> list[tuple[Any, int]]:
@@ -3201,7 +3710,7 @@ async def leaderboard_cmd(
             if entry.user_id == user_id:
                 d_chg = float(entry.change_dollars or 0)
                 p_chg = float(entry.change_percent or 0)
-                rank_desc = f"Your rank: **#{i}** · ${d_chg:+,.2f} ({p_chg:+.2f}%)"
+                rank_desc = f"Your rank: **#{i}** | {format_dollar_gain(d_chg)} ({p_chg:+.2f}%)"
                 break
         games.append(
             _leaderboard_game_data(
@@ -3252,6 +3761,7 @@ def _build_my_stocks_portfolio(user_id: int, game_id: str, display_name: str):
     stock_picks = [
         {
             'stock_ticker': pick.stock_ticker,
+            'company_name': getattr(pick, 'company_name', None),
             'status': pick.status,
             'shares': pick.shares,
             'current_value': pick.current_value,
@@ -3268,20 +3778,57 @@ def _build_my_stocks_portfolio(user_id: int, game_id: str, display_name: str):
     return info, image_buffer, remaining, total
 
 
-@bot.tree.command(name="my-stocks", description="View your stocks in a game as a visual portfolio")
-@app_commands.autocomplete(game_id=ac.all_games_autocomplete)
+@bot.tree.command(
+    name="my-stocks",
+    description="View a portfolio in a game (yours by default, or another player in public games)",
+)
+@app_commands.autocomplete(game_id=ac.game_info_autocomplete)
 @app_commands.describe(
-    game_id="ID of the game"
+    game_id="ID of the game",
+    user="Another player to view (public games only)",
 )
 async def my_stocks(
     interaction: discord.Interaction,
-    game_id: str
+    game_id: str,
+    user: discord.User | None = None,
 ):
-    user_id = interaction.user.id
+    viewer_id = interaction.user.id
+    subject_id = user.id if user is not None else viewer_id
+    viewing_other = subject_id != viewer_id
     await interaction.response.defer(ephemeral=ephemeral_test)
 
     try:
-        participant = await asyncio.to_thread(_participant_for_game, user_id, game_id)
+        game = await asyncio.to_thread(fe.be.get_game, game_id)
+    except LookupError:
+        await interaction.followup.send(
+            embed=simple_embed(
+                status="failed",
+                title="Game Not Found",
+                desc=f"No game with ID {game_id} found.",
+            ),
+            ephemeral=ephemeral_test,
+        )
+        return
+
+    allowed, denial = await asyncio.to_thread(
+        _user_can_view_portfolio,
+        game,
+        viewer_id,
+        subject_id,
+    )
+    if not allowed:
+        await interaction.followup.send(
+            embed=simple_embed(
+                status="failed",
+                title="Cannot View Portfolio",
+                desc=denial or "You cannot view this portfolio.",
+            ),
+            ephemeral=ephemeral_test,
+        )
+        return
+
+    if not viewing_other:
+        participant = await asyncio.to_thread(_participant_for_game, subject_id, game_id)
         if participant is None:
             await interaction.followup.send(
                 embed=simple_embed(
@@ -3321,24 +3868,28 @@ async def my_stocks(
             )
             return
 
+    subject_name = await resolve_player_name(subject_id, interaction.guild)
+
+    try:
         info, image_buffer, remaining, total = await asyncio.to_thread(
             _build_my_stocks_portfolio,
-            user_id,
+            subject_id,
             game_id,
-            interaction.user.display_name,
+            subject_name,
         )
 
-        # Create Discord file
-        file = discord.File(image_buffer, filename=f"portfolio_{user_id}_{game_id}.png")
+        png_bytes = image_buffer.getvalue()
+        filename = f"portfolio_{subject_id}_{game_id}.png"
+        file = discord.File(io.BytesIO(png_bytes), filename=filename)
 
         game = info.game
         rank_line = "Not ranked yet"
         if info.leaderboard:
             for i, entry in enumerate(info.leaderboard, start=1):
-                if entry.user_id == user_id:
+                if entry.user_id == subject_id:
                     d_chg = float(entry.change_dollars or 0)
                     p_chg = float(entry.change_percent or 0)
-                    rank_line = f"**#{i}** · ${d_chg:+,.2f} ({p_chg:+.2f}%)"
+                    rank_line = f"**#{i}** | {format_dollar_gain(d_chg)} ({p_chg:+.2f}%)"
                     break
 
         status_label = game.status
@@ -3348,61 +3899,119 @@ async def my_stocks(
             else "Buy anytime"
         )
         notice = _prestart_notice(game)
+        rank_label = f"{subject_name}'s rank" if viewing_other else "Your rank"
+        picks_label = f"{subject_name}'s picks remaining" if viewing_other else "Picks remaining"
         body = (
-            f"Game `{game.id}` · **{status_label}**\n"
+            f"Game `{game.id}` | **{status_label}**\n"
             f"{pick_line}\n"
-            f"Your rank: {rank_line}\n"
-            f"Picks remaining: **{remaining}** / {game.pick_count} "
+            f"{rank_label}: {rank_line}\n"
+            f"{picks_label}: **{remaining}** / {game.pick_count} "
             f"(${float(game.start_money) / int(game.pick_count):,.2f} per pick)"
         )
+        title = game.name if not viewing_other else f"{game.name} — {subject_name}"
         embed = discord.Embed(
-            title=f"{game.name}",
+            title=title,
             description=f"{notice}\n\n{body}" if notice else body,
             color=discord.Color.blurple(),
         )
-        embed.set_image(url=f"attachment://portfolio_{user_id}_{game_id}.png")
+        embed.set_image(url=f"attachment://{filename}")
         embed.set_footer(text="Leaderboard: /leaderboard | More detail: /game-info")
 
+        share_context = f"Portfolio | {game.name} [{game.id}]"
+        if viewing_other:
+            share_context = f"{share_context} | {subject_name}"
+
+        show_aff_btn = False
+        if not viewing_other:
+            own_participant = await asyncio.to_thread(
+                _participant_for_game,
+                subject_id,
+                game_id,
+            )
+            show_aff_btn = av.show_affiliation_button(fe, game, own_participant)
+
+        share_view = PortfolioShareView(
+            interaction,
+            png_bytes=png_bytes,
+            filename=filename,
+            context=share_context,
+            game_id=str(game_id),
+            show_affiliation_button=show_aff_btn,
+        )
         await interaction.followup.send(
             embed=embed,
             file=file,
+            view=share_view,
             ephemeral=ephemeral_test,
         )
         
     except DoesntExistError:
-        embed = simple_embed(
-            status='failed', 
-            title='Not in Game',
-            desc='You are not currently participating in this game. You can try to join it using the join-game command.'
-        )
+        if viewing_other:
+            embed = simple_embed(
+                status='failed',
+                title='No Portfolio',
+                desc=f'{subject_name} is not participating in game #{game_id}.',
+            )
+        else:
+            embed = simple_embed(
+                status='failed', 
+                title='Not in Game',
+                desc='You are not currently participating in this game. You can try to join it using the join-game command.'
+            )
         await interaction.followup.send(embed=embed, ephemeral=ephemeral_test)
         
     except LookupError:
         try:
-            remaining, total = await asyncio.to_thread(fe.pick_capacity, user_id, game_id)
+            remaining, total = await asyncio.to_thread(fe.pick_capacity, subject_id, game_id)
             game = (await asyncio.to_thread(fe.game_info, game_id, False)).game
             notice = _prestart_notice(game)
-            body = (
-                f'You have not bought any stocks in game #{game_id}. '
-                f'Use `/buy-stock` to make your first pick.\n'
-                f'**Picks remaining:** {remaining} of {total}\n'
-                f'**Allocated per pick:** ${float(game.start_money) / total:,.2f}'
-            )
+            if viewing_other:
+                body = (
+                    f'{subject_name} has not bought any stocks in game #{game_id} yet.\n'
+                    f'**Picks remaining:** {remaining} of {total}\n'
+                    f'**Allocated per pick:** ${float(game.start_money) / total:,.2f}'
+                )
+                title = f'No Stocks Yet — {subject_name}'
+            else:
+                body = (
+                    f'You have not bought any stocks in game #{game_id}. '
+                    f'Use `/buy-stock` to make your first pick.\n'
+                    f'**Picks remaining:** {remaining} of {total}\n'
+                    f'**Allocated per pick:** ${float(game.start_money) / total:,.2f}'
+                )
+                title = 'No Stocks Yet'
             embed = discord.Embed(
-                title='No Stocks Yet',
+                title=title,
                 description=f"{notice}\n\n{body}" if notice else body,
                 color=discord.Color.blue(),
             )
         except (DoesntExistError, LookupError):
-            embed = simple_embed(status='failed', title='Not in Game', desc=f'You are not participating in game #{game_id}.')
+            if viewing_other:
+                embed = simple_embed(
+                    status='failed',
+                    title='No Portfolio',
+                    desc=f'{subject_name} is not participating in game #{game_id}.',
+                )
+            else:
+                embed = simple_embed(
+                    status='failed',
+                    title='Not in Game',
+                    desc=f'You are not participating in game #{game_id}.',
+                )
         await interaction.followup.send(embed=embed, ephemeral=ephemeral_test)
         
     except Exception as e:
-        logger.exception(f'User: {interaction.user.id} tried to generate portfolio image for game: {game_id}. Error: {e}')
+        logger.exception(
+            'User: %s tried to generate portfolio image for user %s in game: %s. Error: %s',
+            viewer_id,
+            subject_id,
+            game_id,
+            e,
+        )
         embed = simple_embed(
             status='failed',
             title='Error Generating Portfolio',
-            desc='An unexpected error occurred while generating your portfolio image'
+            desc='An unexpected error occurred while generating the portfolio image',
         )
         await interaction.followup.send(embed=embed, ephemeral=ephemeral_test)
 
@@ -3419,7 +4028,7 @@ async def game_info(
     game_id: str,
 ):
     await interaction.response.defer(ephemeral=ephemeral_test)
-
+    
     try:
         game_info_obj = await asyncio.to_thread(fe.game_info, game_id, True)
         game = game_info_obj.game
@@ -3607,7 +4216,7 @@ async def my_games(
         embed.title = 'Error'
         embed.description = 'Unable to retrieve your games. Please try again.'
         embed.color = discord.Color.red()
-
+    
     if error:
         await interaction.response.send_message(embed=embed, ephemeral=ephemeral_test)
 
@@ -3645,11 +4254,17 @@ async def user_stats(
 async def about(
     interaction: discord.Interaction,
 ):
-    creators = "<@163784331804934144>: Project Leader, Coordinated Strategic Management Lead, Frontend Dev, Backend Dev, gave the idea for the about command" \
-    "\n<@329374393715392520>: Assistant to the Project Leader, Frontend Dev, Bot Dev, Prompt Engineer, made really big bot commits" \
-    "\n<@1240817181692792934>: Strategy Consultant, Bot Dev, made the about command"
+    creators = "<@163784331804934144>: Co-Project Leader, Strategic Management Lead, Frontend Dev, Backend Dev" \
+    "\n<@329374393715392520>: Co-Project Leader, Prompt Engineer, All of the Dev" \
+    "\n<@1240817181692792934>: Strategy Consultant, Bot Dev"
 
-    embed = discord.Embed(title="About the bot", description="[StockBot](https://github.com/ItsJustAGitHubMichealWhosGonnaSeeIt5Ppl/StockGame) is a discord bot that simulates the purchase of stocks and runs them in a gamified format. Originally built for the Lemonade Stand community.")
+    embed = discord.Embed(
+        title="About the bot", 
+        description="[StockBot](https://github.com/ItsJustAGitHubMichealWhosGonnaSeeIt5Ppl/StockGame) " \
+        "is a discord bot that simulates the purchase of stocks and runs them in a gamified format. " \
+        "Originally built for the Lemonade Stand community.",
+        color=discord.Color.blue()
+    )
     embed.add_field(name="Creators", value=creators)
     embed.add_field(name="Special Thanks", value="<@394012218729168907>: Gave the idea\n<@204414583203430400>: Chaotic Project Tester")
     await interaction.response.send_message(embed=embed, ephemeral=ephemeral_test)
@@ -3657,7 +4272,7 @@ async def about(
 @bot.tree.command(name="logs", description="Download bot logs")
 @app_commands.default_permissions()
 async def logs(
-  interaction: discord.Interaction,
+    interaction: discord.Interaction,
   kind: Literal['debug', 'error'] = 'debug',
 ):
     if not is_moderator(interaction):
@@ -3670,8 +4285,8 @@ async def logs(
             ephemeral=True,
         )
         return
-    title = "Logs"
-    status = 'success'
+        title = "Logs"
+        status = 'success'
     path = latest_log_path(kind)
     if path is None or not os.path.isfile(path):
         await interaction.response.send_message(
@@ -3934,7 +4549,7 @@ if __name__ == '__main__':
             )
         except discord.errors.PrivilegedIntentsRequired:
             logger.critical(
-                "Discord privileged intents required. Enable Message Content / Members "
+                "Discord privileged intents required. Enable Server Members Intent "
                 "in the Discord Developer Portal.",
                 exc_info=True,
             )

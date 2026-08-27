@@ -237,7 +237,7 @@ class GameInviteView(discord.ui.View):
             logger.debug("Could not expire invite buttons on DM message.", exc_info=True)
 
     async def _accept_callback(self, interaction: discord.Interaction) -> None:
-        embed, _success = perform_invited_join(
+        embed, success = perform_invited_join(
             self.fe,
             user_id=interaction.user.id,
             username=interaction.user.display_name,
@@ -246,6 +246,24 @@ class GameInviteView(discord.ui.View):
             had_pending_invite=True,
         )
         await interaction.response.edit_message(embed=embed, view=None)
+        if success:
+            try:
+                game = self.fe.be.get_game(self.game_id)
+                participant = self.fe.be.get_many_participants(
+                    user_id=interaction.user.id,
+                    game_id=self.game_id,
+                )[0]
+                from helpers import affiliation_views as av
+
+                await av.maybe_send_affiliation_prompt(
+                    interaction,
+                    self.fe,
+                    game,
+                    participant_status=participant.status,
+                    ephemeral=True,
+                )
+            except LookupError:
+                pass
 
     async def _decline_callback(self, interaction: discord.Interaction) -> None:
         self.fe.finalize_game_invite(

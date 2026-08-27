@@ -7,11 +7,10 @@ How to create the Discord application, invite the bot, and fix common issues.
 1. Open the [Discord Developer Portal](https://discord.com/developers/applications).
 2. **New Application** → name it → create.
 3. Open **Bot** in the sidebar → **Add Bot** (if needed).
-4. Under **Privileged Gateway Intents**, enable:
-   - **Message Content Intent**
+4. Under **Privileged Gateway Intents**, enable only:
    - **Server Members Intent**
-5. Do **not** require Presence Intent for the current bot (it is unused).
-6. **Reset Token** / copy the token → set `DISCORD_TOKEN` in `.env`.
+   Leave **Message Content Intent** and **Presence Intent** disabled (this bot does not use them).
+5. **Reset Token** / copy the token → set `DISCORD_TOKEN` in `.env`.
 
 ## 2. Invite the bot
 
@@ -50,9 +49,9 @@ Slash commands are synced globally when the bot becomes ready. First sync can ta
 |---------|----------------|
 | Bot offline | Process not running; bad `DISCORD_TOKEN`; check logs for login / privileged-intents errors |
 | Login failed / improper token | Regenerate the token in the Developer Portal and update `.env` |
-| Privileged intents error | Enable Message Content + Server Members in the portal, then restart |
+| Privileged intents error | Enable **Server Members Intent** in the portal, then restart |
 | Slash commands missing | Wait a few minutes after first sync; reload Discord (`Ctrl+R` / `Cmd+R`); confirm `applications.commands` was in the invite URL; re-invite if the scope was missing; check [Discord Integrations](Discord-Integrations) role/channel denies |
-| Commands work but member names look wrong | Members Intent must be enabled and the bot must be able to fetch members in that guild |
+| Commands work but member names look wrong | Server Members Intent must be enabled; names are resolved via API fetch (members are not cached in RAM) |
 | Cannot DM users (alerts / invites) | User must share a server with the bot and allow DMs from server members |
 
 Critical operational alerts may be DMed to a hardcoded admin user ID configured in code (`helpers/logging_setup.py`). That is separate from `OWNER`.

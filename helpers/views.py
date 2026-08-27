@@ -8,6 +8,8 @@ from typing import Callable, Optional, List, Dict, Any, Union, TYPE_CHECKING, ca
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 
+from helpers.affiliations import format_dollar_gain
+
 if TYPE_CHECKING:
     from helpers.datatype_validation import GameInfo
 
@@ -316,7 +318,7 @@ class LeaderboardImageGenerator:
             
             # Dollar gain/loss with color coding
             change_dollars = player_data.get('change_dollars', 0)
-            dollar_change = f"${float(change_dollars):+,.2f}"  # + sign for positive, - for negative
+            dollar_change = format_dollar_gain(float(change_dollars))
             dollar_color = self.colors['positive'] if change_dollars >= 0 else self.colors['negative']
             draw.text((450, y_offset + 15), dollar_change, fill=dollar_color, font=self.fonts['text'])
             
@@ -384,7 +386,7 @@ class StockPortfolioImageGenerator:
     def __init__(self, 
                  width: int = 700,
                  base_height: int = 130,
-                 row_height: int = 45,
+                 row_height: int = 58,
                  theme: str = 'discord_dark'):
         """
         Initialize the StockPortfolioImageGenerator.
@@ -399,6 +401,10 @@ class StockPortfolioImageGenerator:
         self.base_height = base_height
         self.row_height = row_height
         self.theme = theme
+        self.summary_inset = 50
+        self.content_inset = 20
+        self.table_stat_pad = 12
+        self._build_stat_columns()
         
         # Set color scheme based on theme
         self._set_color_scheme()
@@ -413,6 +419,38 @@ class StockPortfolioImageGenerator:
         
         # Load fonts with fallback
         self._load_fonts()
+
+    def _build_stat_columns(self) -> None:
+        """Lay out five equal stat slots with symmetric inner table padding."""
+        inset = self.content_inset
+        stat_left = inset + self.table_stat_pad
+        stat_right = self.width - inset - self.table_stat_pad
+        slot_width = (stat_right - stat_left) // 5
+        keys = ("price", "shares", "value", "gain_d", "gain_p")
+        self.stat_slots = [
+            (stat_left + (index * slot_width), stat_left + ((index + 1) * slot_width))
+            for index in range(5)
+        ]
+        self.columns = {key: self.stat_slots[index][0] for index, key in enumerate(keys)}
+
+    def _draw_stat_cell(
+        self,
+        draw: ImageDraw.ImageDraw,
+        slot_index: int,
+        top: int,
+        bottom: int,
+        text: str,
+        font,
+        fill,
+    ) -> None:
+        left, right = self.stat_slots[slot_index]
+        self._draw_centered_text_in_rect(
+            draw,
+            [left, top, right, bottom],
+            text,
+            font,
+            fill,
+        )
     
     def _set_color_scheme(self):
         """Set colors based on the selected theme."""
@@ -424,10 +462,13 @@ class StockPortfolioImageGenerator:
                 'row_bg_2': (47, 49, 54),
                 'text': (255, 255, 255),
                 'footer': (150, 150, 150),
-                'positive': (76, 175, 80),  # Green for positive gains
-                'negative': (244, 67, 54),  # Red for negative gains
+                'positive': (97, 220, 130),   # bright mint — readable on dark rows
+                'negative': (255, 118, 108),  # bright coral — readable on dark rows
                 'neutral': (255, 255, 255),  # White for neutral/no data
                 'ticker_bg': (32, 34, 37),  # Darker background for ticker
+                'ticker_box': (58, 66, 95),   # muted indigo-slate (pairs with header blue)
+                'company_box': (79, 140, 165),  # steel teal (complements blurple summary)
+                'company_box_text': (22, 38, 48),  # dark slate — readable on teal box
                 'border': (72, 75, 81),
                 'summary_bg': (88, 101, 242)  # Discord blurple for summary
             }
@@ -439,10 +480,13 @@ class StockPortfolioImageGenerator:
                 'row_bg_2': (255, 255, 255),
                 'text': (51, 51, 51),
                 'footer': (128, 128, 128),
-                'positive': (76, 175, 80),
-                'negative': (244, 67, 54),
+                'positive': (46, 125, 50),
+                'negative': (211, 47, 47),
                 'neutral': (51, 51, 51),
                 'ticker_bg': (240, 240, 240),
+                'ticker_box': (66, 103, 178),
+                'company_box': (91, 155, 175),
+                'company_box_text': (22, 38, 48),
                 'border': (200, 200, 200),
                 'summary_bg': (66, 139, 202)
             }
@@ -591,7 +635,8 @@ class StockPortfolioImageGenerator:
         pick_count = int(info.game.pick_count)
         value_per_pick = start_money / pick_count if pick_count > 0 else 0
         pending_stocks_amount = len(pending_stocks) * value_per_pick
-        money_left = start_money - total_value - pending_stocks_amount
+        filled_slots = len(owned_stocks) + len(pending_stocks)
+        money_left = start_money - (filled_slots * value_per_pick)
         
         # Summary box - taller to accommodate 5 items in 2 rows
         summary_rect = [50, y_offset, self.width - 50, y_offset + 110]
@@ -610,7 +655,7 @@ class StockPortfolioImageGenerator:
         
         gain_color = self.colors['positive'] if total_gain_dollars >= 0 else self.colors['negative']
         draw.text((col2_x, row1_y), "Total Gain/Loss:", fill=self.colors['text'], font=self.fonts['text'])
-        draw.text((col2_x, row1_y + 20), f"${total_gain_dollars:+,.2f}", fill=gain_color, font=self.fonts['header'])
+        draw.text((col2_x, row1_y + 20), format_dollar_gain(total_gain_dollars), fill=gain_color, font=self.fonts['header'])
         
         percent_color = self.colors['positive'] if total_gain_percent >= 0 else self.colors['negative']
         draw.text((col3_x, row1_y), "Total Return:", fill=self.colors['text'], font=self.fonts['text'])
@@ -625,23 +670,185 @@ class StockPortfolioImageGenerator:
         
         return y_offset + 110
     
+    def _portfolio_company_name(self, stock: Dict[str, Any]) -> Optional[str]:
+        """Return a display company name when it adds information beyond the ticker."""
+        ticker = str(stock.get("stock_ticker") or stock.get("ticker") or "")
+        raw = stock.get("company_name") or stock.get("company") or ""
+        name = str(raw).strip()
+        if not name:
+            return None
+        if name.upper() == ticker.upper():
+            return None
+        return name
+
+    def _truncate_to_width(
+        self,
+        draw: ImageDraw.ImageDraw,
+        text: str,
+        font,
+        max_width: int,
+    ) -> str:
+        if not text:
+            return ""
+        if draw.textbbox((0, 0), text, font=font)[2] <= max_width:
+            return text
+        ellipsis = "..."
+        low = 0
+        high = len(text)
+        while low < high:
+            mid = (low + high + 1) // 2
+            candidate = f"{text[:mid]}{ellipsis}"
+            if draw.textbbox((0, 0), candidate, font=font)[2] <= max_width:
+                low = mid
+            else:
+                high = mid - 1
+        return f"{text[:low]}{ellipsis}" if low > 0 else ellipsis
+
+    def _text_size(self, draw: ImageDraw.ImageDraw, text: str, font) -> tuple[int, int]:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+    def _draw_centered_text_in_rect(
+        self,
+        draw: ImageDraw.ImageDraw,
+        rect: list[int],
+        text: str,
+        font,
+        fill,
+    ) -> None:
+        cx = (rect[0] + rect[2]) // 2
+        cy = (rect[1] + rect[3]) // 2
+        draw.text((cx, cy), text, fill=fill, font=font, anchor="mm")
+
+    def _draw_left_text_in_rect(
+        self,
+        draw: ImageDraw.ImageDraw,
+        rect: list[int],
+        text: str,
+        font,
+        fill,
+        *,
+        pad_x: int = 8,
+    ) -> None:
+        cy = (rect[1] + rect[3]) // 2
+        draw.text((rect[0] + pad_x, cy), text, fill=fill, font=font, anchor="lm")
+
+    def _stock_display_name(self, stock: Dict[str, Any], *, pending: bool = False) -> str:
+        """Format ``<Ticker> | <Company Name>`` for the row title line."""
+        ticker = str(stock.get("stock_ticker", "N/A"))
+        if pending:
+            ticker = f"{ticker}*"
+        company = self._portfolio_company_name(stock)
+        if company:
+            return f"{ticker} | {company}"
+        return ticker
+
+    def _draw_stock_title(
+        self,
+        draw: ImageDraw.ImageDraw,
+        y_offset: int,
+        stock: Dict[str, Any],
+        *,
+        pending: bool = False,
+    ) -> None:
+        """Draw ticker and company label boxes above stat columns."""
+        inset = self.content_inset
+        title_left = inset + self.table_stat_pad
+        inner_right = self.width - inset
+        title_right = inner_right - self.table_stat_pad
+        inner_width = title_right - title_left
+        bar_top = y_offset + 6
+        bar_height = 22
+        gap = 4
+        pad_x = 8
+        ticker_color = self.colors["ticker_box"]
+        company_color = self.colors["company_box"]
+
+        ticker = str(stock.get("stock_ticker", "N/A"))
+        if pending:
+            ticker = f"{ticker}*"
+        company = self._portfolio_company_name(stock)
+
+        if company:
+            max_ticker_inner = min(120, inner_width // 3)
+            ticker_label = self._truncate_to_width(
+                draw,
+                ticker,
+                self.fonts["text"],
+                max(max_ticker_inner - pad_x * 2, 24),
+            )
+            ticker_w = self._text_size(draw, ticker_label, self.fonts["text"])[0] + pad_x * 2
+            ticker_w = max(min(ticker_w, max_ticker_inner), 52)
+
+            company_left = title_left + ticker_w + gap
+            max_company_inner = max(title_right - company_left - pad_x * 2, 24)
+            company_label = self._truncate_to_width(
+                draw,
+                company,
+                self.fonts["text"],
+                max_company_inner,
+            )
+            company_w = self._text_size(draw, company_label, self.fonts["text"])[0] + pad_x * 2
+
+            ticker_rect = [title_left, bar_top, title_left + ticker_w, bar_top + bar_height]
+            company_rect = [company_left, bar_top, company_left + company_w, bar_top + bar_height]
+
+            draw.rectangle(ticker_rect, fill=ticker_color)
+            draw.rectangle(company_rect, fill=company_color)
+
+            self._draw_centered_text_in_rect(
+                draw,
+                ticker_rect,
+                ticker_label,
+                self.fonts["text"],
+                self.colors["text"],
+            )
+            self._draw_left_text_in_rect(
+                draw,
+                company_rect,
+                company_label,
+                self.fonts["text"],
+                self.colors["company_box_text"],
+                pad_x=pad_x,
+            )
+            return
+
+        ticker_label = self._truncate_to_width(
+            draw,
+            ticker,
+            self.fonts["text"],
+            inner_width - pad_x * 2,
+        )
+        ticker_w = self._text_size(draw, ticker_label, self.fonts["text"])[0] + pad_x * 2
+        ticker_w = min(max(ticker_w, 52), inner_width)
+        ticker_rect = [title_left, bar_top, title_left + ticker_w, bar_top + bar_height]
+        draw.rectangle(ticker_rect, fill=ticker_color)
+        self._draw_centered_text_in_rect(
+            draw,
+            ticker_rect,
+            ticker_label,
+            self.fonts["text"],
+            self.colors["text"],
+        )
+
     def _draw_stock_header(self, draw: ImageDraw.ImageDraw, y_offset: int) -> int:
         """Draw stock table header."""
-        header_rect = [20, y_offset, self.width - 20, y_offset + 35]
+        inset = self.content_inset
+        header_rect = [inset, y_offset, self.width - inset, y_offset + 35]
         draw.rectangle(header_rect, fill=self.colors['header'])
         
-        # Header columns with better spacing
-        headers = [
-            (40, "Ticker"),
-            (120, "Price"),
-            (220, "Shares"),
-            (330, "Value"),
-            (460, "$ Gain"),
-            (580, "% Gain")
-        ]
-        
-        for x, header_text in headers:
-            draw.text((x, y_offset + 10), header_text, fill=self.colors['text'], font=self.fonts['header'])
+        headers = ["Price", "Shares", "Value", "$ Gain", "% Gain"]
+        header_bottom = y_offset + 35
+        for index, header_text in enumerate(headers):
+            self._draw_stat_cell(
+                draw,
+                index,
+                y_offset,
+                header_bottom,
+                header_text,
+                self.fonts["header"],
+                self.colors["text"],
+            )
         
         return y_offset + 35
     
@@ -657,106 +864,111 @@ class StockPortfolioImageGenerator:
 
         # Draw owned stocks
         for idx, stock in enumerate(owned_stocks):
+            stats_y = y_offset + 34
             # Alternating row colors
             row_color = self.colors['row_bg_1'] if idx % 2 == 0 else self.colors['row_bg_2']
-            row_rect = [20, y_offset, self.width - 20, y_offset + self.row_height]
+            inset = self.content_inset
+            row_rect = [inset, y_offset, self.width - inset, y_offset + self.row_height]
             draw.rectangle(row_rect, fill=row_color)
             
             # Extract stock data with safe defaults
-            ticker = str(stock.get('stock_ticker', 'N/A'))
             shares = float(stock.get('shares', 0))
             current_value = float(stock.get('current_value', 0))
             change_dollars = float(stock.get('change_dollars', 0))
             change_percent = float(stock.get('change_percent', 0))
-            status = str(stock.get('status', 'N/A'))
             
             # Calculate share price
             share_price = current_value / shares if shares > 0 else 0
             
-            # Draw ticker (with background highlight)
-            ticker_rect = [25, y_offset + 8, 95, y_offset + self.row_height - 8]
-            draw.rectangle(ticker_rect, fill=self.colors['ticker_bg'])
-            bbox = draw.textbbox((0, 0), ticker, font=self.fonts['text'])
-            ticker_text_width = bbox[2] - bbox[0]
-            ticker_rect_center_x = (ticker_rect[0] + ticker_rect[2]) // 2
-            ticker_text_x = ticker_rect_center_x - (ticker_text_width // 2)
-            draw.text((ticker_text_x, y_offset + 15), ticker, fill=self.colors['text'], font=self.fonts['text'])
+            self._draw_stock_title(draw, y_offset, stock)
             
+            stats_bottom = y_offset + self.row_height - 6
             # Draw price
             price_text = f"${share_price:,.2f}"
-            draw.text((120, y_offset + 15), price_text, fill=self.colors['text'], font=self.fonts['text'])
+            self._draw_stat_cell(
+                draw, 0, stats_y, stats_bottom, price_text, self.fonts["text"], self.colors["text"]
+            )
             
             # Draw shares
             shares_text = f"{shares:,.2f}" if shares else "0"
-            draw.text((220, y_offset + 15), shares_text, fill=self.colors['text'], font=self.fonts['text'])
+            self._draw_stat_cell(
+                draw, 1, stats_y, stats_bottom, shares_text, self.fonts["text"], self.colors["text"]
+            )
             
             # Draw value
             value_text = f"${current_value:,.2f}"
-            draw.text((330, y_offset + 15), value_text, fill=self.colors['text'], font=self.fonts['text'])
+            self._draw_stat_cell(
+                draw, 2, stats_y, stats_bottom, value_text, self.fonts["text"], self.colors["text"]
+            )
             
             # Draw dollar gain (color coded)
-            dollar_text = f"${change_dollars:+,.2f}"
+            dollar_text = format_dollar_gain(change_dollars)
             dollar_color = self.colors['positive'] if change_dollars >= 0 else self.colors['negative']
-            draw.text((460, y_offset + 15), dollar_text, fill=dollar_color, font=self.fonts['text'])
+            self._draw_stat_cell(
+                draw, 3, stats_y, stats_bottom, dollar_text, self.fonts["text"], dollar_color
+            )
             
             # Draw percentage gain (color coded)
             percent_text = f"{change_percent:+.2f}%"
             percent_color = self.colors['positive'] if change_percent >= 0 else self.colors['negative']
-            draw.text((580, y_offset + 15), percent_text, fill=percent_color, font=self.fonts['text'])
+            self._draw_stat_cell(
+                draw, 4, stats_y, stats_bottom, percent_text, self.fonts["text"], percent_color
+            )
             
             y_offset += self.row_height
         
         # Draw pending stocks
         for idx, stock in enumerate(pending_stocks):
+            stats_y = y_offset + 34
             # Continue alternating pattern from owned stocks
             total_owned = len(owned_stocks)
             row_color = self.colors['row_bg_1'] if (total_owned + idx) % 2 == 0 else self.colors['row_bg_2']
-            row_rect = [20, y_offset, self.width - 20, y_offset + self.row_height]
+            inset = self.content_inset
+            row_rect = [inset, y_offset, self.width - inset, y_offset + self.row_height]
             draw.rectangle(row_rect, fill=row_color)
             
-            # Extract stock data
-            ticker = str(stock.get('stock_ticker', 'N/A'))
             # Pending stocks use current_value if available, otherwise value_per_pick
             pending_value = value_per_pick
             
             # Try to get price if available (pending stocks might have price data)
-            # Check if we can calculate from shares and value, or use a default
             shares = stock.get('shares')
             if shares and float(shares) > 0:
                 share_price = pending_value / float(shares)
             else:
-                # If no shares, we can't calculate price - show N/A
                 share_price = 0
             
-            # Draw ticker with "*" indicator for pending
-            ticker_rect = [25, y_offset + 8, 95, y_offset + self.row_height - 8]
-            draw.rectangle(ticker_rect, fill=self.colors['ticker_bg'])
-            ticker_with_status = f"{ticker}*"
-            bbox = draw.textbbox((0, 0), ticker_with_status, font=self.fonts['text'])
-            ticker_text_width = bbox[2] - bbox[0]
-            ticker_rect_center_x = (ticker_rect[0] + ticker_rect[2]) // 2
-            ticker_text_x = ticker_rect_center_x - (ticker_text_width // 2)
-            draw.text((ticker_text_x, y_offset + 15), ticker_with_status, fill=self.colors['text'], font=self.fonts['text'])
+            self._draw_stock_title(draw, y_offset, stock, pending=True)
             
+            stats_bottom = y_offset + self.row_height - 6
             # Draw price (show N/A if not available)
             if share_price > 0:
                 price_text = f"${share_price:,.2f}"
             else:
                 price_text = "N/A"
-            draw.text((120, y_offset + 15), price_text, fill=self.colors['footer'], font=self.fonts['text'])
+            self._draw_stat_cell(
+                draw, 0, stats_y, stats_bottom, price_text, self.fonts["text"], self.colors["footer"]
+            )
             
             # Draw shares - show "Pending" instead
-            draw.text((220, y_offset + 15), "Pending", fill=self.colors['footer'], font=self.fonts['text'])
+            self._draw_stat_cell(
+                draw, 1, stats_y, stats_bottom, "Pending", self.fonts["text"], self.colors["footer"]
+            )
             
             # Draw value (the allocated amount)
             value_text = f"${pending_value:,.2f}"
-            draw.text((330, y_offset + 15), value_text, fill=self.colors['text'], font=self.fonts['text'])
+            self._draw_stat_cell(
+                draw, 2, stats_y, stats_bottom, value_text, self.fonts["text"], self.colors["text"]
+            )
             
             # Draw dollar gain - show "-" for pending
-            draw.text((460, y_offset + 15), "-", fill=self.colors['footer'], font=self.fonts['text'])
+            self._draw_stat_cell(
+                draw, 3, stats_y, stats_bottom, "-", self.fonts["text"], self.colors["footer"]
+            )
             
             # Draw percentage gain - show "-" for pending
-            draw.text((580, y_offset + 15), "-", fill=self.colors['footer'], font=self.fonts['text'])
+            self._draw_stat_cell(
+                draw, 4, stats_y, stats_bottom, "-", self.fonts["text"], self.colors["footer"]
+            )
             
             y_offset += self.row_height
         
@@ -764,7 +976,7 @@ class StockPortfolioImageGenerator:
     
     def _draw_footer(self, draw: ImageDraw.ImageDraw, height: int, footer_y: int, last_updated: Optional[datetime.datetime] = None):
         """Draw footer text."""
-        draw.text((20, footer_y), "Last Updated: " +
+        draw.text((self.content_inset, footer_y), "Last Updated: " +
                   (last_updated.strftime("%Y-%m-%d %H:%M:%S") if last_updated else "Generated by StockBot"), 
                  fill=self.colors['footer'], font=self.fonts['small'])
 

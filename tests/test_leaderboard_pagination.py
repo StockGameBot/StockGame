@@ -37,6 +37,10 @@ def _buttons(view) -> dict[str, discord.ui.Button]:
     }
 
 
+def _page_button_labels() -> tuple[str, ...]:
+    return ("First page", "Previous page", "Next page", "Last page")
+
+
 def test_leaderboard_view_pages_ranks_and_games():
     import discord_bot as db
 
@@ -62,19 +66,40 @@ def test_leaderboard_view_pages_ranks_and_games():
         view = db.UserLeaderboardView(invoking, games)
 
         buttons = _buttons(view)
-        assert list(buttons) == ["Previous game", "Previous page", "Next page", "Next game"]
+        assert list(buttons) == [
+            *_page_button_labels(),
+            "Previous game",
+            "Next game",
+            "Share",
+        ]
+        assert buttons["First page"].disabled
         assert buttons["Previous game"].disabled
         assert buttons["Previous page"].disabled
         assert not buttons["Next page"].disabled
+        assert not buttons["Last page"].disabled
         assert not buttons["Next game"].disabled
+        for label in _page_button_labels():
+            assert buttons[label].row == db.UserLeaderboardView._ROW_PAGES
+        assert buttons["Previous game"].row == db.UserLeaderboardView._ROW_GAMES
+        assert buttons["Share"].row == db.UserLeaderboardView._ROW_ACTIONS
 
         click = _interaction()
         await view._next_rank_page(click)
         assert view.rank_page_index == 1
         buttons = _buttons(view)
+        assert not buttons["First page"].disabled
         assert not buttons["Previous page"].disabled
         assert buttons["Next page"].disabled
+        assert buttons["Last page"].disabled
         assert click.edit_original_response.await_args.kwargs["attachments"][0].filename == "page-2.png"
+
+        click = _interaction()
+        await view._last_rank_page(click)
+        assert view.rank_page_index == 1
+
+        click = _interaction()
+        await view._first_rank_page(click)
+        assert view.rank_page_index == 0
 
         click = _interaction()
         await view._next_game(click)
@@ -83,8 +108,10 @@ def test_leaderboard_view_pages_ranks_and_games():
         buttons = _buttons(view)
         assert not buttons["Previous game"].disabled
         assert buttons["Next game"].disabled
+        assert buttons["First page"].disabled
         assert buttons["Previous page"].disabled
         assert buttons["Next page"].disabled
+        assert buttons["Last page"].disabled
 
     asyncio.run(run())
 
@@ -103,8 +130,11 @@ def test_game_info_view_keeps_disabled_rank_buttons_visible():
             show_game_controls=False,
         )
         buttons = _buttons(view)
-        assert list(buttons) == ["Previous page", "Next page"]
-        assert all(button.disabled for button in buttons.values())
+        assert list(buttons) == [*_page_button_labels(), "Share"]
+        for label in _page_button_labels():
+            assert buttons[label].disabled
+        assert not buttons["Share"].disabled
+        assert buttons["Share"].row == db.UserLeaderboardView._ROW_ACTIONS
 
     asyncio.run(run())
 
@@ -454,4 +484,146 @@ def test_game_arrows_only_include_own_and_other_recurring_games(mocker):
     result = db._leaderboard_browse_games(42)
 
     assert [game.id for game, _count in result] == ["MINE1", "REC01"]
+
+
+def _text_channel_interaction(*, can_share: bool = True):
+    interaction = _interaction()
+    perms = SimpleNamespace(
+        view_channel=can_share,
+        send_messages=can_share,
+        attach_files=can_share,
+    )
+    me = SimpleNamespace()
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 999
+    channel.mention = "#general"
+    channel.guild = SimpleNamespace(me=me)
+    channel.permissions_for = MagicMock(return_value=perms)
+    channel.send = AsyncMock()
+    interaction.channel = channel
+    interaction.user = SimpleNamespace(id=10, mention="<@10>")
+    interaction.followup = SimpleNamespace(send=AsyncMock())
+    return interaction
+
+
+def test_share_posts_image_and_attribution_when_allowed():
+    import discord_bot as db
+
+    async def run():
+        view = db.UserLeaderboardView(
+            _text_channel_interaction(),
+            [{
+                "title": "My Game",
+                "rank_page_count": 1,
+                "rank_pages": {0: _rank_page(1, 1, 5)},
+            }],
+        )
+        click = _text_channel_interaction()
+        await view._share(click)
+
+        click.response.defer.assert_awaited_once_with(ephemeral=True)
+        click.channel.send.assert_awaited_once()
+        sent = click.channel.send.await_args
+        assert sent.kwargs["content"] == "Shared by <@10> | Leaderboard | My Game"
+        assert sent.kwargs["file"].filename == "page-1.png"
+        click.followup.send.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_share_denied_when_bot_lacks_permissions(mocker):
+    import discord_bot as db
+
+    async def run():
+        click = _text_channel_interaction(can_share=False)
+        await db._post_shared_image(
+            click,
+            png_bytes=b"png",
+            filename="share.png",
+            context="Portfolio | Game [G1]",
+        )
+
+        click.channel.send.assert_not_awaited()
+        click.followup.send.assert_awaited_once()
+        assert click.followup.send.await_args.kwargs["embed"].title == "Cannot share here"
+
+    asyncio.run(run())
+
+
+def test_portfolio_share_view_posts_publicly():
+    import discord_bot as db
+
+    async def run():
+        owner = _text_channel_interaction()
+        view = db.PortfolioShareView(
+            owner,
+            png_bytes=b"portfolio-png",
+            filename="portfolio.png",
+            context="Portfolio | Game [G1]",
+        )
+        click = _text_channel_interaction()
+        share_button = _buttons(view)["Share"]
+        await share_button.callback(click)
+
+        click.channel.send.assert_awaited_once()
+        assert "Portfolio | Game [G1]" in click.channel.send.await_args.kwargs["content"]
+
+    asyncio.run(run())
+
+
+def test_leaderboard_view_timeout_disables_share_and_pagination():
+    import discord_bot as db
+
+    async def run():
+        interaction = _interaction()
+        message = MagicMock()
+        message.edit = AsyncMock()
+        interaction.original_response = AsyncMock(return_value=message)
+        view = db.UserLeaderboardView(
+            interaction,
+            [{
+                "title": "One",
+                "rank_page_count": 2,
+                "rank_pages": {
+                    0: _rank_page(1, 1, 15),
+                    1: _rank_page(2, 16, 22),
+                },
+            },
+            {
+                "title": "Two",
+                "rank_page_count": 1,
+                "rank_pages": {0: _rank_page(1, 1, 4)},
+            }],
+        )
+        await view.on_timeout()
+
+        message.edit.assert_awaited_once()
+        expired = message.edit.await_args.kwargs["view"]
+        buttons = _buttons(expired)
+        assert all(button.disabled for button in buttons.values())
+
+    asyncio.run(run())
+
+
+def test_portfolio_share_view_timeout_disables_share():
+    import discord_bot as db
+
+    async def run():
+        interaction = _interaction()
+        message = MagicMock()
+        message.edit = AsyncMock()
+        interaction.original_response = AsyncMock(return_value=message)
+        view = db.PortfolioShareView(
+            interaction,
+            png_bytes=b"portfolio-png",
+            filename="portfolio.png",
+            context="Portfolio | Game [G1]",
+        )
+        await view.on_timeout()
+
+        message.edit.assert_awaited_once()
+        share = _buttons(message.edit.await_args.kwargs["view"])["Share"]
+        assert share.disabled
+
+    asyncio.run(run())
 

@@ -1,111 +1,155 @@
- Changelog
+# Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes to this project are documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project would like to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+SQLite schema versions match `db_schema.db_ver`. **Beta** began with [PR #162](https://github.com/StockGameBot/StockGame/pull/162) (2026-08-20). Everything before that is summarized under [Alpha / development](#alpha--development).
 
 ## [Unreleased]
 
-### General
-
-#### Added
-- New game variables/settings to `add_game` backend method
-- `list_game_members` backend method
-- `my_games` frontend method
-- Merged discord bot into main
-- `DB_NAME` and `OWNER` to frontend in `discord_boy.py`
-- `private_game` variables to `discord_boy.py`
-- `.env` example file
-- Misc Docstrings to `sqlhelper.py`
-- More validation for `add_game` and `add_stock_pick` method
-- Basic filtering to `list_games` method
-- More filtering for `list_stock_picks` method
-- `remove_stock_pick`, `remove_pick`, `update_game`, `update_game_member`, `maange_game`, `pending_game_users`, `approve_game_users`, `update_games`, `update_game_members`, `_user_owns_game`, `remove_user` methods
-- `delete` method to `sqlhelper.py`
-- Portfolio/game member total value is now updated 
-- Template gitignore
-
-#### Fixed
-- Misc minor issues with both frontend and backend validation and docstrings
-- Issue where `_reformat_sqlite` was applying ID multiple times
-
-#### Changed
-- Frontend and backend classes now require the database name
-- Moved general overview/information from top of `stocks.py` to `readme.md`
-- Moved sqlite helpers to separate script/module
-- `_reformat_sqlite` methods now uses keys from database to map custom names
-- All functions using `_reformat_sqlite` updated for new format
-- Bumped backend version to 0.0.2
-- `create` to `add` for most backend methods
-- `list_users` now users sqlite helper functions
-- Basic error handling to `add_user_to_game` backend method
-- `create_game` to `new_game` in frontend
-- `user_id` to `owner` in `add_game` and `new_game` method
-- `add_stock` and `get_stock` now return a status/result
-- `update_stock_prices` will skip stocks that have already been updated
-- Moved error handling to separate method in `sqlhelper.py`
-- Database now opens and closes for each run, allowing other tools to access it
-
-#### Removed
-- Unneeded imports from `stocks.py`
-- Removed `dotenv` import as it does not appear to do anything
-
-### Database Creation (db_schema; formerly sqlite_creator_real)
-
-#### Added
-- Private game toggle (defaults to False)
-- `status`, `name` to `game_participants`
-
-#### Fixed
-- Misc docstrings/descriptions
-
-#### Changed
-- Database name is now set in `.env` file
-- `datetime_registered` to `datetime_created` in `users`
-- `game_name` to `name` in `games`
-- `game_status` to `status` in `games`
-- `price_date` to `datetime` in `stock_price`
-- `pick_status` to `status` in `stock_picks`
-- Now runs inside a function and requires a database name to be provided
-
-#### Removed
-- idx_games Index
-- Misc Todos
-
-## [0.0.1] - 2025.04.29
-
 ### Added
-- Changelog
-- Readme
-- _sql_get method for internal use to hopefully reduce redundancy
-- add_stock_pick, list_stock_picks methods
-- picks columns and custom columns/table option for _reformat_sqlite method
-- Docstrings for methods list_users, list_stocks, get_stock, add_stock_price,
-- Lots of placeholder methods
-- create_game method now returns status
-- Discord bot framework
-
-
-### Fixed
-- Data format for get_stock method
-
-### Changed
-- join_datetime to datetime_joined in game_participants table (SQLite DB)
-- datetime_updated can no longer be null in stock_picks table (SQLite DB)
-- username to display_name in add_user method
-- get_stock and list_stock_prices methods now use _sql_get()
-- Renamed StockGame class to Backend
-
-### Removed
-- Misc placeholders and completed todos
-
-## [0.0.0] - Template
-
-### Added
-
-### Fixed
 
 ### Changed
 
+### Fixed
+
+## [0.2.7] - 2026-08-26 (Beta)
+
+### Added
+
+- Recurring-game **affiliations** (optional per template): Atrioc, DougDoug, Aiden, The Working Class, or Independent
+- Schema: `affiliations_enabled` on `game_templates`, `affiliation` on `game_participants` (migration 0.2.6 → 0.2.7)
+- Affiliation prompt after join/invite; **Choose Affiliation** on `/my-stocks`, `/leaderboard`, and `/game-info`
+- Affiliation badges on the recurring leaderboard image (left of player names)
+- **Overall Performance** hedge-fund table image on live leaderboard push embeds (`helpers/affiliation_performance_image.py`)
+- PNG assets under `assets/affiliations/`
+
+### Changed
+
+- Recurring leaderboard affiliation icons: larger size, vertically centered with usernames
+- Affiliation performance table: fund icons beside names (Independent has none); image width increased
+- Portfolio summary **Money Left to Spend** uses unfilled pick slots (matches game cash logic), not market value
+- Portfolio image: company names in stock rows, consistent `+$` / `-$` gain formatting, ticker/company box layout
+- `/leaderboard` pagination: **First page** and **Last page** buttons; controls split across three rows (pages / games / actions)
+
+### Fixed
+
+- Portfolio image showed non-zero “money left” whenever stocks moved up or down (inverted gain/loss)
+- `discord_bot.py` indentation/syntax errors that blocked imports and tests
+
+## [0.2.6] - 2026-08-26 (Beta)
+
+### Added
+
+- Schema: `invalid_stocks` table — short-lived cache when Alpaca cannot resolve a ticker (migration 0.2.5 → 0.2.6)
+- `/buy-stock` accepts multiple tickers in one command; shared validation and lower duplicate API work
+- Tests for multi-ticker buy flow and invalid-ticker caching
+
+### Changed
+
+- `/buy-stock` defers once up front, uses a bounded in-memory Alpaca price cache, and trims Discord intents / member caching
+
+## [0.2.5] - 2026-08-24 (Beta)
+
+### Fixed
+
+- Schema: backfill `stock_picks.start_value` when low starting-cash games rounded per-pick allocation to zero (migration 0.2.4 → 0.2.5)
+- Portfolio totals could divide by zero when `start_value` was stored as zero
+- Exclusive picks vs pick-deadline validation in game creation and `/create-recurring-game`
+- Game autocomplete no longer surfaced games the user cannot access
+
+## [0.2.4] - 2026-08-20 (Beta)
+
+First beta release to main: [PR #162](https://github.com/StockGameBot/StockGame/pull/162).
+
+### Added
+
+- Schema: `leaderboard_final_pushed` on `games` for a one-time final-standings push when a game ends (migration 0.2.3 → 0.2.4)
+- Final standings **podium** image generation and push wiring (`helpers/final_standings_podium.py`)
+- Game ID autocomplete labels include a status emoji
+
+### Fixed
+
+- Recurring live leaderboard push regression after podium/final-standings work
+
+### Changed
+
+- **Share** on `/leaderboard` and `/my-stocks`: post the current image to the channel with attribution
+- `/my-stocks` can show another player’s portfolio in **public** games (owner/moderator rules apply)
+
+## [0.2.3] - 2026-08-19
+
+Shipped during alpha; included in the first beta builds.
+
+### Added
+
+- Schema: `auto_top_roles` on `game_templates`, `top_roles_applied` on `games`, `template_role_holders` table (migration 0.2.2 → 0.2.3)
+- Automatic 1st / 2nd / 3rd Discord role assignment for recurring templates (`helpers/recurring_top_roles.py`)
+- `/manage-recurring-games` toggle for auto top roles
+
+## [0.2.2] - 2026-08-16
+
+### Added
+
+- Schema: `game_invites` table for pending DM game invites (migration 0.2.1 → 0.2.2)
+- Invite flow aligned between frontend and backend; in-channel fallback when DMs are closed
+
+### Fixed
+
+- `delete_game` permission vulnerability
+- Misc database and workflow script issues
+
+### Changed
+
+- QoL on game creation wizard, autocomplete consolidation, Pillow image generation optimizations
+- Pre-start notice on open games (picks stay pending until start date)
+
+## [0.2.1] - 2026-08-05
+
 ### Removed
+
+- Schema: custom team `name` column on `game_participants` (migration 0.2.0 → 0.2.1)
+
+## [0.2.0] - 2026-08-05
+
+### Added
+
+- Schema: recurring **push leaderboard** (`push_leaderboard`, `leaderboard_channel_id` on templates; `leaderboard_message_id` on games)
+- Schema: `days_in_first` on `game_participants`, `leaderboard_day_snapshots` table
+- Live recurring leaderboard images edited in a configured channel (`helpers/leaderboard_push.py`, `helpers/recurring_leaderboard_image.py`)
+- Hourly DB backups, migrate-or-remake startup via `db_schema.ensure_database()`
+
+### Changed
+
+- Version mismatch on an existing DB triggers backup + migration when registered, otherwise remake (with backup)
+
+---
+
+## Alpha / development
+
+Work before [PR #162](https://github.com/StockGameBot/StockGame/pull/162) / the beta line. Not production-complete; see git history for detail.
+
+### Highlights (2025-08 → 2026-08)
+
+- Discord bot merged into the main repo; Alpaca market data; Docker Compose deployment
+- Public / private games, pick deadlines, exclusive picks, pending join approval
+- Recurring game templates and lifecycle (`/create-recurring-game`, `/manage-recurring-games`)
+- Paginated `/leaderboard` with lazy rank-page rendering and recurring vs one-off layouts
+- `/my-stocks` portfolio PNG, `/game-info`, `/game-list`, `/my-games`, kicks, invites, moderators
+- Async command handlers, expanded test suite, CI workflows
+- Schema versions **0.1.x** (legacy participant/game fields, price updates)
+
+### [0.1.0] / [0.1.1] - 2025-06-27
+
+- Early SQLite schema and migration scaffolding
+
+### [0.0.1] - 2025-04-29
+
+- Initial changelog, readme, and Discord bot framework
+- Backend renamed from `StockGame` to `Backend`; core CRUD for users, games, stocks, picks
+- SQLite helper refactor (`sqlhelper.py`), basic validation
+
+### [0.0.0] - Template
+
+- Project scaffold
