@@ -1164,6 +1164,35 @@ class Backend:
         resp = self.sql.get(table='stock_picks', left_join=left_str, filters=filters, order={'change_percent': 'DESC', 'change_dollars': 'DESC'})
         return self._many_get(typeadapter=dtv.StockPicks, resp=resp)
 
+    def get_active_picks_for_stock(
+        self,
+        stock_id: int,
+        *,
+        game_id: Optional[int | str] = None,
+    ) -> tuple[dtv.StockPick, ...]:
+        """Picks for ``stock_id`` in active games (pending_buy, owned, pending_sell)."""
+        import helpers.datatype_validation as dtv
+
+        game_filter = ""
+        params: list[Any] = [stock_id]
+        if game_id is not None:
+            game_filter = "AND game_id = ?"
+            params.append(str(game_id))
+        query = f"""
+        WHERE stock_id = ?
+        AND status IN ("pending_buy", "owned", "pending_sell")
+        AND participation_id IN (
+            SELECT participation_id FROM game_participants
+            WHERE status = "active"
+            {game_filter}
+        )
+        """
+        try:
+            resp = self.sql.get(table="stock_picks", filters=(query, params))
+            return tuple(self._many_get(typeadapter=dtv.StockPicks, resp=resp))
+        except LookupError:
+            return ()
+
     def update_stock_pick(self, pick_id:int, current_value:Optional[float]=None, shares:Optional[float]=None, start_value:Optional[float]=None, status:Optional[str]=None, change_dollars:Optional[float]=None, change_percent:Optional[float]=None, event_label:Optional[str]=None, stock_id:Optional[int]=None): #Update a single stock pick
         """Update a stock pick
 
@@ -2202,14 +2231,29 @@ class GameLogic: # Might move some of the control/running actions here
             raise ValueError("Unable to find stock")
 
         self.be.clear_invalid_ticker(db_ticker)
+        try:
+            asset = self.alpaca.get_us_equity(db_ticker)
+        except LookupError:
+            self.be.record_invalid_ticker(db_ticker)
+            raise ValueError("Unable to find stock")
+        except ValueError:
+            self.be.record_invalid_ticker(db_ticker)
+            raise
+
         company_name = db_ticker
-        exchange = "UNKNOWN"
+        exchange = str(asset.get("exchange") or "UNKNOWN")
         try:
             from helpers.equity_meta import lookup_company_name
 
             resolved_name = lookup_company_name(db_ticker, alpaca=self.alpaca)
             if resolved_name:
                 company_name = resolved_name
+            elif asset.get("name"):
+                from helpers.equity_meta import autocomplete_label
+
+                raw_name = str(asset["name"]).strip()
+                if autocomplete_label(db_ticker, raw_name) != db_ticker:
+                    company_name = raw_name
         except Exception:
             self.logger.debug('Company name lookup failed for %s', db_ticker, exc_info=True)
 
@@ -2892,6 +2936,12 @@ class Frontend: # This will be where a bot (like discord) interacts
         stock = self.be.get_stock(ticker_or_id=resolved_ticker)
         if getattr(stock, 'trade_status', 'active') == 'delisted':
             raise ValueError('Stock was delisted and can no longer be purchased.')
+        try:
+            self.gl.alpaca.get_us_equity(resolved_ticker)
+        except ValueError:
+            raise ValueError('Stock is not tradeable')
+        except LookupError:
+            raise ValueError('Unable to find stock')
 
         # Draft mode: prevent duplicate tickers across players
         game = self.be.get_game(game_id=game_id)

@@ -53,11 +53,22 @@ def be(db_path):
     return backend
 
 @pytest.fixture(scope="function")
-def fe(db_path):
+def fe(db_path, mocker):
     """Provides a Frontend instance connected to a real, temporary SQLite DB."""
     from db_schema import create
     from stocks import Frontend    
 
     create(db_path) # Initialize the schema in the temporary database
     frontend = Frontend(database_name=db_path, owner_user_id=10, source='testing')
+    mocker.patch.object(
+        frontend.gl.alpaca,
+        "get_us_equity",
+        return_value={
+            "name": "Test Company",
+            "exchange": "NASDAQ",
+            "status": "active",
+            "tradable": True,
+            "class": "us_equity",
+        },
+    )
     return frontend

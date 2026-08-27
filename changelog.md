@@ -24,16 +24,20 @@ SQLite schema versions match `db_schema.db_ver`. **Beta** began with [PR #162](h
 - Market-aligned update schedule (9:15 pre-open through 16:15 post-close, 15-min grid)
 - `scripts/spike_corporate_actions.py` for manual CA API probes
 - One-time IMCC 2026-08-27 reverse-split repair on bot startup
+- Untradeable/inactive equity repair: removes dead picks and marks `trade_status = delisted`
+- One-time 0.2.8 startup repairs (`helpers/repairs_0_2_8.py`): untradeable pick cleanup + stress test game end date **2026-08-31**
 
 ### Changed
 
 - Alpaca snapshot batch size raised to 500; price polling gated to weekday market windows unless forced
 - `pending_buy` picks settle only during market hours
-- `/buy-stock` rejects delisted tickers with a clear error message
+- `/buy-stock` rejects delisted and Alpaca-inactive/untradable tickers with clear errors
+- New tickers require Alpaca `active` + `tradable` asset status (not just a stale snapshot price)
 
 ### Fixed
 
 - Split-day phantom gains when share count was not adjusted before revaluation
+- Players could buy delisted/inactive symbols (e.g. ZEUS, BAD) that only had stale IEX snapshot prices
 
 ## [0.2.7] - 2026-08-26 (Beta)
 

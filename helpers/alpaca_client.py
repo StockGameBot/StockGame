@@ -177,6 +177,25 @@ class AlpacaMarketData:
 
         return asset
 
+    def fetch_buyable_db_tickers(self) -> set[str]:
+        """Return DB-normalized tickers for all active, tradable US equities."""
+        self._require_configured()
+        r = self._get(
+            f"{self.trading_base}/v2/assets",
+            params={"status": "active", "asset_class": "us_equity"},
+        )
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, list):
+            return set()
+        return {
+            to_db_ticker(str(item["symbol"]))
+            for item in data
+            if isinstance(item, dict)
+            and item.get("tradable")
+            and item.get("symbol")
+        }
+
     def equity_is_priced(self, ticker: str) -> bool:
         """True if market data returns a usable price for this symbol."""
         self._require_configured()
