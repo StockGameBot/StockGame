@@ -706,7 +706,7 @@ class StockPortfolioImageGenerator:
 
     def _text_size(self, draw: ImageDraw.ImageDraw, text: str, font) -> tuple[int, int]:
         bbox = draw.textbbox((0, 0), text, font=font)
-        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+        return int(bbox[2] - bbox[0]), int(bbox[3] - bbox[1])
 
     def _draw_centered_text_in_rect(
         self,

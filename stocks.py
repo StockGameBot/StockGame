@@ -788,9 +788,11 @@ class Backend:
         """Return True when ``ticker`` is cached as invalid and still blocked."""
         db_ticker = to_db_ticker(ticker)
         resp = self.sql.get(table='invalid_stocks', filters={'ticker': db_ticker})
-        if resp.status != 'success':
+        if resp.status != 'success' or not isinstance(resp.result, tuple) or not resp.result:
             return False
         row = resp.result[0]
+        if not isinstance(row, dict):
+            return False
         return str(row['expires_at']) > _iso8601()
 
     def record_invalid_ticker(self, ticker: str) -> None:

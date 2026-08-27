@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Awaitable, Callable
+from typing import Optional
 
 import discord
 
@@ -18,7 +19,7 @@ from helpers.affiliations import (
     normalize_affiliation,
 )
 
-SelectCallback = Callable[[discord.Interaction, str | None], None]
+SelectCallback = Callable[[discord.Interaction, str | None], Awaitable[None]]
 
 
 def _affiliation_label(key: str | None) -> str:
