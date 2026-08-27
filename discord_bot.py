@@ -4285,8 +4285,8 @@ async def logs(
             ephemeral=True,
         )
         return
-        title = "Logs"
-        status = 'success'
+    title = "Logs"
+    status = 'success'
     path = latest_log_path(kind)
     if path is None or not os.path.isfile(path):
         await interaction.response.send_message(
