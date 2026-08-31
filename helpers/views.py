@@ -290,6 +290,28 @@ class LeaderboardImageGenerator:
             draw.text((x, y_offset + 10), header_text, fill=self.colors['text'], font=self.fonts['header'])
         
         return y_offset + 40
+
+    def _truncate_to_width(
+        self,
+        draw: ImageDraw.ImageDraw,
+        text: str,
+        font,
+        max_width: int,
+    ) -> str:
+        if not text:
+            return ""
+        if draw.textbbox((0, 0), text, font=font)[2] <= max_width:
+            return text
+        ellipsis = "..."
+        low = 0
+        high = len(text)
+        while low < high:
+            mid = (low + high + 1) // 2
+            if draw.textbbox((0, 0), text[:mid] + ellipsis, font=font)[2] <= max_width:
+                low = mid
+            else:
+                high = mid - 1
+        return text[:low] + ellipsis if low else ellipsis
     
     def _draw_leaderboard_rows(self, draw: ImageDraw.ImageDraw, leaderboard_data: List[Dict], y_offset: int) -> int:
         """Draw leaderboard rows."""
@@ -305,10 +327,11 @@ class LeaderboardImageGenerator:
             rank_color = self._get_rank_color(rank - 1)
             draw.text((20, y_offset + 15), rank_text, fill=rank_color, font=self.fonts['text'])
             
-            # Player name
+            # Player name (x=100 .. Portfolio column at x=300)
             player_name = player_data.get('display_name', f"ID({player_data.get('user_id', 'Unknown')})")
-            if len(player_name) > 20:
-                player_name = player_name[:19] + "..."
+            player_name = self._truncate_to_width(
+                draw, str(player_name), self.fonts['text'], max_width=190,
+            )
             draw.text((100, y_offset + 15), player_name, fill=self.colors['text'], font=self.fonts['text'])
             
             # Portfolio value
@@ -537,7 +560,8 @@ class StockPortfolioImageGenerator:
                              game_data: Dict[str, Any],
                              stock_picks: List[Dict[str, Any]],
                              info,
-                             show_footer: bool = True) -> BytesIO:
+                             show_footer: bool = True,
+                             fund_label: Optional[str] = None) -> BytesIO:
         """
         Create a stock portfolio image from user, game, and stock data.
         
@@ -572,14 +596,19 @@ class StockPortfolioImageGenerator:
         
         title_text = f"{user_name}'s Portfolio"
         subtitle_text = f"Game: {game_name} (ID: {game_id})"
-        
+
+        title_text = self._truncate_to_width(
+            draw, title_text, self.fonts['title'], max_width=self.width - 40,
+        )
         y_offset = self._draw_centered_text(draw, title_text, y_offset, self.fonts['title'], self.colors['text'])
         y_offset = self._draw_centered_text(draw, subtitle_text, y_offset, self.fonts['text'], self.colors['footer'])
         y_offset += 15
         
         if owned_stocks or pending_stocks:
             # Calculate and draw portfolio summary
-            y_offset = self._draw_portfolio_summary(draw, all_stocks, y_offset, info)
+            y_offset = self._draw_portfolio_summary(
+                draw, all_stocks, y_offset, info, fund_label=fund_label,
+            )
             y_offset += 20
             
             # Draw stock table
@@ -621,7 +650,15 @@ class StockPortfolioImageGenerator:
         draw.text((x, y), text, fill=color, font=font)
         return int(y + text_height + 10)
     
-    def _draw_portfolio_summary(self, draw: ImageDraw.ImageDraw, all_stocks: Dict[str, List[Dict]], y_offset: int, info) -> int:
+    def _draw_portfolio_summary(
+        self,
+        draw: ImageDraw.ImageDraw,
+        all_stocks: Dict[str, List[Dict]],
+        y_offset: int,
+        info,
+        *,
+        fund_label: Optional[str] = None,
+    ) -> int:
         """Draw portfolio summary section."""
         owned_stocks = all_stocks['owned']
         pending_stocks = all_stocks['pending']
@@ -671,6 +708,13 @@ class StockPortfolioImageGenerator:
         
         draw.text((col2_x, row2_y), "Money Left to Spend:", fill=self.colors['text'], font=self.fonts['text'])
         draw.text((col2_x, row2_y + 20), f"${money_left:,.2f}", fill=self.colors['text'], font=self.fonts['header'])
+
+        if fund_label:
+            fund_text = self._truncate_to_width(
+                draw, fund_label, self.fonts['header'], max_width=180,
+            )
+            draw.text((col3_x, row2_y), "Fund:", fill=self.colors['text'], font=self.fonts['text'])
+            draw.text((col3_x, row2_y + 20), fund_text, fill=self.colors['text'], font=self.fonts['header'])
         
         return y_offset + 110
     

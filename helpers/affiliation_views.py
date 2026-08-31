@@ -24,7 +24,7 @@ SelectCallback = Callable[[discord.Interaction, str | None], Awaitable[None]]
 
 def _affiliation_label(key: str | None) -> str:
     if key is None:
-        return "None (Independent)"
+        return "Independent (solo fund)"
     return AFFILIATION_DISPLAY.get(key, key)
 
 
@@ -34,9 +34,9 @@ class AffiliationSelect(discord.ui.Select):
     def __init__(self, *, on_chosen: Optional[SelectCallback] = None) -> None:
         options = [
             discord.SelectOption(
-                label="None (Independent)",
+                label="Independent (solo fund)",
                 value="__none__",
-                description="No team affiliation",
+                description="No fund — play on your own",
             ),
             discord.SelectOption(
                 label=AFFILIATION_DISPLAY[AFFILIATION_ATRIOC],
@@ -56,7 +56,7 @@ class AffiliationSelect(discord.ui.Select):
             ),
         ]
         super().__init__(
-            placeholder="Choose your hedge-fund affiliation…",
+            placeholder="Choose your fund…",
             min_values=1,
             max_values=1,
             options=options,
@@ -67,7 +67,7 @@ class AffiliationSelect(discord.ui.Select):
         view: AffiliationSelectView = self.view  # type: ignore[assignment]
         if interaction.user.id != view.user_id:
             await interaction.response.send_message(
-                "Only you can choose an affiliation here.",
+                "Only you can choose a fund here.",
                 ephemeral=True,
             )
             return
@@ -93,7 +93,7 @@ class AffiliationSelect(discord.ui.Select):
         self.disabled = True
         await interaction.response.edit_message(
             content=(
-                f"✅ Affiliation set to **{label}** for game **#{view.game_id}**.\n"
+                f"✅ Fund set to **{label}** for game **#{view.game_id}**.\n"
                 f"{AFFILIATION_WARNING}"
             ),
             view=view,
@@ -157,7 +157,7 @@ async def maybe_send_affiliation_prompt(
     )
     await interaction.followup.send(
         content=(
-            f"Choose a hedge-fund affiliation for **{game.name}** (#{game.id}):\n\n"
+            f"Pick your fund for **{game.name}** (#{game.id}):\n\n"
             f"{AFFILIATION_WARNING}"
         ),
         view=view,
@@ -166,7 +166,7 @@ async def maybe_send_affiliation_prompt(
 
 
 def show_affiliation_button(fe, game, participant) -> bool:
-    """True when the Choose Affiliation button should appear."""
+    """True when the Choose Fund button should appear."""
     if participant is None:
         return False
     if getattr(participant, "affiliation", None) is not None:

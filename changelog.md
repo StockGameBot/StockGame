@@ -4,13 +4,32 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-SQLite schema versions match `db_schema.db_ver`. **Beta** began with [PR #162](https://github.com/StockGameBot/StockGame/pull/162) (2026-08-20). Everything before that is summarized under [Alpha / development](#alpha--development).
+SQLite schema versions match `db_schema.db_ver`. **Beta** began with [PR #162](https://github.com/StockGameBot/StockGame/pull/162) (2026-08-20) and ended at **1.0.0**. Everything before beta is summarized under [Alpha / development](#alpha--development).
 
 ## [Unreleased]
 
 ### Added
 
 ### Changed
+
+### Fixed
+
+## [1.0.0] - 2026-08-30
+
+First stable release after the beta line (0.2.x).
+
+### Added
+
+- **Join Game** button on recurring leaderboard push messages and `/leaderboard` when viewing a joinable recurring game
+- Expanded `/user-stats`: best/worst pick ever, recurring 1st/2nd/3rd podiums, best recurring finish
+- Fund label in my-stocks portfolio summary box (when funds are enabled and chosen)
+- One-time startup fix: stress test game `LWFN6` end date **2026-08-29**
+
+### Changed
+
+- Leaderboard and portfolio images use guild nicknames with pixel-width clipping (no overlap with other columns)
+- Optional `game_id` on `/buy-stock`, `/remove-stock`, `/my-stocks`, `/game-info`, and `/leave-game` when only one eligible game matches
+- User-facing **Fund** terminology replaces Affiliation (internal schema unchanged)
 
 ### Fixed
 

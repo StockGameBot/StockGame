@@ -72,6 +72,11 @@ def test_buy_stock_command_batch_summary(mocker):
         ],
     )
     mocker.patch.object(db.fe, "pick_capacity", return_value=(1, 3))
+    mocker.patch.object(
+        db,
+        "_resolve_game_id_for_command",
+        AsyncMock(return_value="GAME1"),
+    )
 
     async def run():
         command = db.bot.tree.get_command("buy-stock")
