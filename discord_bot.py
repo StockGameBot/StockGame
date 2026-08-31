@@ -527,6 +527,16 @@ async def on_ready():
         await asyncio.to_thread(ca.repair_imcc_2026_08_27, fe.be, fe.gl.alpaca)
     except Exception:
         logger.exception('IMCC split repair skipped due to error')
+    try:
+        from helpers.recurring_join_view import register_recurring_join_views
+        register_recurring_join_views(bot, fe)
+    except Exception:
+        logger.exception('Failed to register recurring join views')
+    try:
+        from helpers import startup_fixes
+        await asyncio.to_thread(startup_fixes.run_startup_fixes, fe.be)
+    except Exception:
+        logger.exception('Startup fixes skipped due to error')
     # Keep the equity universe current without delaying command sync.
     asyncio.create_task(_seed_sp500_on_startup())
     try:
@@ -1441,7 +1451,7 @@ class LeaderboardChannelSelect(discord.ui.View):
     exclusive_picks="Enable exclusive picks: each stock can only be picked once (optional, default: False)",
     push_leaderboard="Post/edit a live leaderboard image in a channel (default: False)",
     auto_top_roles="Assign 1st/2nd/3rd roles when each game ends (default: False)",
-    affiliations_enabled="Enable hedge-fund team affiliations (default: False)",
+    affiliations_enabled="Enable hedge-fund teams / funds (default: False)",
 )
 async def create_recurring_game(
     interaction: discord.Interaction,
@@ -1555,7 +1565,7 @@ async def create_recurring_game(
                 inline=True,
             )
             embed.add_field(
-                name="🤝 Affiliations",
+                name="🤝 Funds",
                 value="Yes" if affiliations_enabled else "No",
                 inline=True,
             )
@@ -2167,13 +2177,13 @@ class RecurringTemplateManager(discord.ui.View):
         affiliations_on = bool(self.templates and self.templates[self.index].affiliations_enabled)
         if affiliations_on:
             affiliations_btn = discord.ui.Button(
-                label="Disable Affiliations",
+                label="Disable Funds",
                 style=discord.ButtonStyle.secondary,
             )
             affiliations_btn.callback = self._disable_affiliations  # type: ignore[method-assign]
         else:
             affiliations_btn = discord.ui.Button(
-                label="Enable Affiliations",
+                label="Enable Funds",
                 style=discord.ButtonStyle.success,
             )
             affiliations_btn.callback = self._enable_affiliations  # type: ignore[method-assign]
@@ -2239,7 +2249,7 @@ class RecurringTemplateManager(discord.ui.View):
         roles_txt = "On" if template.auto_top_roles else "Off"
         embed.add_field(name="🏆 Auto Top Roles", value=roles_txt, inline=True)
         aff_txt = "On" if template.affiliations_enabled else "Off"
-        embed.add_field(name="🤝 Affiliations", value=aff_txt, inline=True)
+        embed.add_field(name="🤝 Funds", value=aff_txt, inline=True)
         if self.interaction.user.id != template.owner_id:
             embed.add_field(name="👤 Owner", value=f"<@{template.owner_id}>", inline=True)
         embed.set_footer(text=f"Template ID: {template.id}")
@@ -2436,12 +2446,12 @@ class RecurringTemplateManager(discord.ui.View):
             self._sync_buttons()
             await interaction.response.edit_message(embed=self.build_embed(), view=self)
             await interaction.followup.send(
-                f"🤝 Affiliations enabled for **{template.name}** (applies to all active games).",
+                f"🤝 Funds enabled for **{template.name}** (applies to all active games).",
                 ephemeral=True,
             )
         except Exception as exc:
             logger.exception("enable affiliations failed | template_id=%s", template.id, exc_info=exc)
-            await interaction.response.send_message("❌ Failed to enable affiliations.", ephemeral=True)
+            await interaction.response.send_message("❌ Failed to enable funds.", ephemeral=True)
 
     async def _disable_affiliations(self, interaction: discord.Interaction) -> None:
         template = self.templates[self.index]
@@ -2451,12 +2461,12 @@ class RecurringTemplateManager(discord.ui.View):
             self._sync_buttons()
             await interaction.response.edit_message(embed=self.build_embed(), view=self)
             await interaction.followup.send(
-                f"🤝 Affiliations disabled for **{template.name}** (applies to all active games).",
+                f"🤝 Funds disabled for **{template.name}** (applies to all active games).",
                 ephemeral=True,
             )
         except Exception as exc:
             logger.exception("disable affiliations failed | template_id=%s", template.id, exc_info=exc)
-            await interaction.response.send_message("❌ Failed to disable affiliations.", ephemeral=True)
+            await interaction.response.send_message("❌ Failed to disable funds.", ephemeral=True)
 
     async def _set_channel(self, interaction: discord.Interaction) -> None:
         template = self.templates[self.index]
@@ -2508,13 +2518,19 @@ class RecurringTemplateManager(discord.ui.View):
 @bot.tree.command(name="leave-game", description="Leave a game you are participating in")
 @app_commands.autocomplete(game_id=ac.all_games_autocomplete)
 @app_commands.describe(
-    game_id="ID of the game to leave"
+    game_id="ID of the game to leave (optional when you are in only one eligible game)",
 )
 async def leave_game(
     interaction: discord.Interaction,
-    game_id: str,
+    game_id: str | None = None,
 ):
     await interaction.response.defer(ephemeral=ephemeral_test)
+    resolved = await _resolve_game_id_for_command(
+        interaction, game_id, purpose="leave",
+    )
+    if resolved is None:
+        return
+    game_id = resolved
     try:
         await asyncio.to_thread(fe.leave_game, interaction.user.id, game_id)
         await interaction.followup.send(
@@ -2759,7 +2775,7 @@ def _buy_stock_outcome(
     ticker_10=ac.buy_ticker_autocomplete,
 )
 @app_commands.describe(
-    game_id="ID of the game",
+    game_id="ID of the game (optional when you are in only one eligible game)",
     ticker="First stock ticker symbol",
     ticker_2="Optional second ticker",
     ticker_3="Optional third ticker",
@@ -2773,7 +2789,7 @@ def _buy_stock_outcome(
 )
 async def buy_stock(
     interaction: discord.Interaction, 
-    game_id: str, 
+    game_id: str | None, 
     ticker: str,
     ticker_2: str | None = None,
     ticker_3: str | None = None,
@@ -2786,6 +2802,12 @@ async def buy_stock(
     ticker_10: str | None = None,
 ):
     await interaction.response.defer(ephemeral=ephemeral_test)
+    resolved = await _resolve_game_id_for_command(
+        interaction, game_id, purpose="buy",
+    )
+    if resolved is None:
+        return
+    game_id = resolved
     tickers = _collect_buy_tickers(
         ticker,
         ticker_2,
@@ -2876,9 +2898,22 @@ async def buy_stock(
 
 @bot.tree.command(name="remove-stock", description="Cancel a pending stock purchase")
 @app_commands.autocomplete(game_id=ac.all_games_autocomplete, ticker=ac.sell_ticker_autocomplete)
-@app_commands.describe(game_id="ID of the game", ticker="Pending stock ticker to cancel")
-async def remove_stock(interaction: discord.Interaction, game_id: str, ticker: str):
+@app_commands.describe(
+    game_id="ID of the game (optional when you are in only one eligible game)",
+    ticker="Pending stock ticker to cancel",
+)
+async def remove_stock(
+    interaction: discord.Interaction,
+    game_id: str | None,
+    ticker: str,
+):
     await interaction.response.defer(ephemeral=ephemeral_test)
+    resolved = await _resolve_game_id_for_command(
+        interaction, game_id, purpose="buy",
+    )
+    if resolved is None:
+        return
+    game_id = resolved
     ticker = ticker.upper().strip()
     try:
         await asyncio.to_thread(
@@ -3042,7 +3077,7 @@ class PortfolioShareView(discord.ui.View):
         self.clear_items()
         if self.show_affiliation_button and self.game_id and not self.affiliation_chosen:
             aff_btn = discord.ui.Button(
-                label="Choose Affiliation",
+                label="Choose Fund",
                 style=discord.ButtonStyle.primary,
             )
             aff_btn.callback = self._choose_affiliation  # type: ignore[method-assign]
@@ -3061,7 +3096,7 @@ class PortfolioShareView(discord.ui.View):
             on_chosen=self._on_affiliation_chosen,
         )
         await interaction.response.send_message(
-            content=f"Choose a hedge-fund affiliation for game **#{self.game_id}**:\n\n{AFFILIATION_WARNING}",
+            content=f"Pick your fund for game **#{self.game_id}**:\n\n{AFFILIATION_WARNING}",
             view=view,
             ephemeral=True,
         )
@@ -3154,6 +3189,21 @@ class UserLeaderboardView(discord.ui.View):
         show = av.show_affiliation_button(fe, game, participant)
         return show, game_key if show else None
 
+    def _join_button_game_id(self) -> str | None:
+        from helpers.recurring_join_view import recurring_join_view_for_game
+
+        game = self.current_game.get("game")
+        if game is None:
+            return None
+        game_id = getattr(game, "id", None)
+        if game_id is None:
+            return None
+        if _participant_for_game(self.interaction.user.id, str(game_id)) is not None:
+            return None
+        if recurring_join_view_for_game(game) is None:
+            return None
+        return str(game_id)
+
     def _sync_buttons(self) -> None:
         self.clear_items()
 
@@ -3215,12 +3265,22 @@ class UserLeaderboardView(discord.ui.View):
         if show_aff and aff_game_id:
             self.affiliation_game_id = aff_game_id
             aff_btn = discord.ui.Button(
-                label="Choose Affiliation",
+                label="Choose Fund",
                 style=discord.ButtonStyle.primary,
                 row=self._ROW_ACTIONS,
             )
             aff_btn.callback = self._choose_affiliation  # type: ignore[method-assign]
             self.add_item(aff_btn)
+
+        join_game_id = self._join_button_game_id()
+        if join_game_id:
+            join_btn = discord.ui.Button(
+                label="Join Game",
+                style=discord.ButtonStyle.success,
+                row=self._ROW_ACTIONS,
+            )
+            join_btn.callback = self._join_game  # type: ignore[method-assign]
+            self.add_item(join_btn)
 
         share = discord.ui.Button(
             label="Share",
@@ -3241,12 +3301,24 @@ class UserLeaderboardView(discord.ui.View):
         )
         await interaction.response.send_message(
             content=(
-                f"Choose a hedge-fund affiliation for game **#{self.affiliation_game_id}**:\n\n"
+                f"Pick your fund for game **#{self.affiliation_game_id}**:\n\n"
                 f"{AFFILIATION_WARNING}"
             ),
             view=view,
             ephemeral=True,
         )
+
+    async def _join_game(self, interaction: discord.Interaction) -> None:
+        join_game_id = self._join_button_game_id()
+        if join_game_id is None:
+            await interaction.response.send_message(
+                "This game is not joinable from here.",
+                ephemeral=True,
+            )
+            return
+        from helpers.recurring_join_view import perform_recurring_join
+
+        await perform_recurring_join(interaction, join_game_id)
 
     async def _on_affiliation_chosen(
         self,
@@ -3360,14 +3432,12 @@ class UserLeaderboardView(discord.ui.View):
 
 
 async def resolve_player_name(user_id: int, guild: discord.Guild | None) -> str:
-    """Live Discord name for leaderboard rows, trimmed to the image's 16-char budget.
+    """Live Discord name for leaderboard rows (guild nickname preferred).
 
     Stored DB display names are unreliable (only set on first registration), so
-    always prefer the current guild member / user profile.
+    always prefer the current guild member / user profile. Image generators
+    clip to column width.
     """
-    def trim(value: str) -> str:
-        return value if len(value) <= 16 else value[:15] + "~"
-
     member: discord.Member | None = None
     if guild is not None:
         member = guild.get_member(user_id)
@@ -3377,16 +3447,47 @@ async def resolve_player_name(user_id: int, guild: discord.Guild | None) -> str:
             except discord.HTTPException:
                 member = None
     if member is not None:
-        for candidate in (member.display_name, member.global_name, member.name):
-            if candidate and len(candidate) <= 16:
-                return candidate
-        return trim(member.global_name or member.name)
+        nick = getattr(member, "nick", None)
+        if nick:
+            return nick
+        if member.display_name:
+            return member.display_name
+        if member.global_name:
+            return member.global_name
+        return member.name
 
     try:
         discord_user = await bot.fetch_user(user_id)
     except (discord.HTTPException, LookupError):
         return f"ID({user_id})"
-    return trim(discord_user.display_name or discord_user.name)
+    return discord_user.display_name or discord_user.name
+
+
+def _game_resolve_error_embed(exc: LookupError) -> discord.Embed:
+    return simple_embed(status="failed", title="Which game?", desc=str(exc))
+
+
+async def _resolve_game_id_for_command(
+    interaction: discord.Interaction,
+    game_id: str | None,
+    *,
+    purpose: str,
+    subject_user_id: int | None = None,
+) -> str | None:
+    try:
+        return await asyncio.to_thread(
+            fe.resolve_game_id,
+            interaction.user.id,
+            game_id,
+            purpose=purpose,
+            subject_user_id=subject_user_id,
+        )
+    except LookupError as exc:
+        await interaction.followup.send(
+            embed=_game_resolve_error_embed(exc),
+            ephemeral=ephemeral_test,
+        )
+        return None
 
 
 def _cached_game_info_leaderboard_png(
@@ -3799,8 +3900,16 @@ def _participant_for_game(user_id: int, game_id: str):
 
 def _build_my_stocks_portfolio(user_id: int, game_id: str, display_name: str):
     """Load portfolio data and render the PNG (runs in a worker thread)."""
+    from helpers.affiliations import AFFILIATION_DISPLAY, INDEPENDENT_KEY
+
     picks = fe.my_stocks(user_id, game_id)
     info = fe.game_info(game_id)
+    fund_label = None
+    if is_affiliations_enabled(fe.be, info.game):
+        participant = _participant_for_game(user_id, game_id)
+        if participant and not av.show_affiliation_button(fe, info.game, participant):
+            key = getattr(participant, "affiliation", None)
+            fund_label = AFFILIATION_DISPLAY.get(key or INDEPENDENT_KEY, "Independent")
     user_data = {
         'display_name': display_name,
         'user_id': user_id,
@@ -3824,7 +3933,7 @@ def _build_my_stocks_portfolio(user_id: int, game_id: str, display_name: str):
         for pick in picks
     ]
     image_buffer = get_portfolio_generator().create_portfolio_image(
-        user_data, game_data, stock_picks, info
+        user_data, game_data, stock_picks, info, fund_label=fund_label,
     )
     remaining, total = fe.pick_capacity(user_id, game_id)
     return info, image_buffer, remaining, total
@@ -3836,18 +3945,28 @@ def _build_my_stocks_portfolio(user_id: int, game_id: str, display_name: str):
 )
 @app_commands.autocomplete(game_id=ac.game_info_autocomplete)
 @app_commands.describe(
-    game_id="ID of the game",
+    game_id="ID of the game (optional when you are in only one eligible game)",
     user="Another player to view (public games only)",
 )
 async def my_stocks(
     interaction: discord.Interaction,
-    game_id: str,
+    game_id: str | None = None,
     user: discord.User | None = None,
 ):
     viewer_id = interaction.user.id
     subject_id = user.id if user is not None else viewer_id
     viewing_other = subject_id != viewer_id
     await interaction.response.defer(ephemeral=ephemeral_test)
+
+    resolved = await _resolve_game_id_for_command(
+        interaction,
+        game_id,
+        purpose="portfolio",
+        subject_user_id=subject_id,
+    )
+    if resolved is None:
+        return
+    game_id = resolved
 
     try:
         game = await asyncio.to_thread(fe.be.get_game, game_id)
@@ -4073,13 +4192,20 @@ async def my_stocks(
 @bot.tree.command(name="game-info", description="View information about a game")
 @app_commands.autocomplete(game_id=ac.game_info_autocomplete)
 @app_commands.describe(
-    game_id="ID of the game to view",
+    game_id="ID of the game to view (optional when you are in only one eligible game)",
 )
 async def game_info(
     interaction: discord.Interaction,
-    game_id: str,
+    game_id: str | None = None,
 ):
     await interaction.response.defer(ephemeral=ephemeral_test)
+
+    resolved = await _resolve_game_id_for_command(
+        interaction, game_id, purpose="info",
+    )
+    if resolved is None:
+        return
+    game_id = resolved
     
     try:
         game_info_obj = await asyncio.to_thread(fe.game_info, game_id, True)
@@ -4283,16 +4409,47 @@ async def user_stats(
     await interaction.response.defer(ephemeral=ephemeral_test) # Defer the response to allow time for the update
     try:
         discord_user: discord.User | discord.Member = user if user else interaction.user
-        user_title = f"{discord_user.display_name}{f' ({discord_user.name})' if discord_user.display_name != discord_user.name else ''}"
+        display = await resolve_player_name(discord_user.id, interaction.guild)
+        user_title = display
+        if user and discord_user.display_name != discord_user.name:
+            user_title = f"{display} ({discord_user.name})"
         
-        user_stats = await asyncio.to_thread(fe.get_user, discord_user.id)
+        stats = await asyncio.to_thread(fe.get_user_stats, discord_user.id)
+        user_stats_obj = stats.user
 
         embed = discord.Embed(title=user_title, description="Global Statistics")
         embed.set_thumbnail(url=discord_user.display_avatar)
-        embed.add_field(name="Total wins:", value=user_stats.overall_wins)
-        embed.add_field(name="Change Dollars/Change %", value=f"{user_stats.change_dollars}/{user_stats.change_percent}")
+        embed.add_field(
+            name="Recurring podiums (1st / 2nd / 3rd)",
+            value=f"{stats.recurring_first} / {stats.recurring_second} / {stats.recurring_third}",
+            inline=False,
+        )
+        embed.add_field(
+            name="Overall change ($ / %)",
+            value=f"{format_dollar_gain(user_stats_obj.change_dollars or 0)} / {user_stats_obj.change_percent or 0:.2f}%",
+            inline=False,
+        )
+        if stats.best_stock_ticker is not None and stats.best_stock_percent is not None:
+            embed.add_field(
+                name="Best pick ever",
+                value=f"**{stats.best_stock_ticker}** ({stats.best_stock_percent:+.2f}%)",
+                inline=True,
+            )
+        if stats.worst_stock_ticker is not None and stats.worst_stock_percent is not None:
+            embed.add_field(
+                name="Worst pick ever",
+                value=f"**{stats.worst_stock_ticker}** ({stats.worst_stock_percent:+.2f}%)",
+                inline=True,
+            )
+        if stats.best_recurring_rank is not None:
+            finish = stats.best_recurring_game_name or "Recurring game"
+            embed.add_field(
+                name="Best recurring finish",
+                value=f"**#{stats.best_recurring_rank}** in {finish}",
+                inline=False,
+            )
         embed.color = discord.Color.blue()
-        embed.set_footer(text="Only completed (ended) games are included in these stats.")
+        embed.set_footer(text="Only completed games are included in these stats.")
 
         await interaction.followup.send(embed=embed, ephemeral=ephemeral_test)
     except LookupError:
@@ -4426,7 +4583,7 @@ def _regular_help_embed(
     embed.add_field(
         name="Play and track results",
         value=(
-            "`/buy-stock` - Add a stock pick to one of your games.\n"
+            "`/buy-stock` - Add a stock pick (`game_id` optional when you are in one eligible game).\n"
             "`/remove-stock` - Cancel a purchase that is still pending.\n"
             "`/my-stocks` - View your portfolio, performance, and current rank.\n"
             "`/leaderboard` - Browse rankings for your games or accessible games.\n"

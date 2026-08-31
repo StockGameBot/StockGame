@@ -42,9 +42,9 @@ _ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets" / "affiliations"
 _ICON_CACHE: dict[tuple[str, int], Image.Image] = {}
 
 AFFILIATION_WARNING = (
-    "**Important:** Your affiliation is **permanent once chosen** and **cannot be changed** "
+    "**Important:** Your **fund choice** is permanent once selected and **cannot be changed** "
     "after the game has started.\n"
-    "If you stay unaffiliated, you may still pick a team mid-game - but you **cannot switch teams** afterward."
+    "If you stay unassigned, you may still pick a fund mid-game — but you **cannot switch funds** afterward."
 )
 
 

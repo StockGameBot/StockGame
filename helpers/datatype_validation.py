@@ -214,6 +214,19 @@ class MyGames(BaseModel):
     games: list[Game]
 
 
+class UserStatsDetail(BaseModel):
+    user: User
+    recurring_first: int = 0
+    recurring_second: int = 0
+    recurring_third: int = 0
+    best_stock_ticker: Optional[str] = None
+    best_stock_percent: Optional[float] = None
+    worst_stock_ticker: Optional[str] = None
+    worst_stock_percent: Optional[float] = None
+    best_recurring_rank: Optional[int] = None
+    best_recurring_game_name: Optional[str] = None
+
+
 class GameLeaderboard(BaseModel):
     user_id: int
     current_value: float

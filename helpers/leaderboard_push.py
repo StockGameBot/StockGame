@@ -480,6 +480,7 @@ async def _upsert_leaderboard_page(
     filename: str,
     game_id: Any,
     extra_files: Optional[list[tuple[BytesIO, str]]] = None,
+    view: Optional[discord.ui.View] = None,
 ) -> Optional[str]:
     """Edit one page in place, or send a new message when missing/unknown."""
     image.seek(0)
@@ -493,6 +494,8 @@ async def _upsert_leaderboard_page(
         edit_kwargs["embeds"] = []
     else:
         edit_kwargs["embed"] = embed
+    if view is not None:
+        edit_kwargs["view"] = view
 
     if message_id:
         try:
@@ -525,9 +528,9 @@ async def _upsert_leaderboard_page(
             attachments.append(discord.File(extra_buf, filename=extra_name))
     try:
         if embed is None:
-            sent = await channel.send(files=attachments)
+            sent = await channel.send(files=attachments, view=view)
         else:
-            sent = await channel.send(embed=embed, files=attachments)
+            sent = await channel.send(embed=embed, files=attachments, view=view)
     except Exception as exc:
         logger.warning("Leaderboard page send failed for game %s: %s", game_id, exc)
         return None
@@ -581,6 +584,11 @@ async def push_or_edit_leaderboard_messages(
             if len(images) == 1
             else f"recurring_leaderboard_{index + 1}.png"
         )
+        join_view = None
+        if is_last:
+            from helpers.recurring_join_view import recurring_join_view_for_game
+
+            join_view = recurring_join_view_for_game(game)
         page_id = await _upsert_leaderboard_page(
             channel=channel,
             message_id=existing[index] if index < len(existing) else None,
@@ -593,6 +601,7 @@ async def push_or_edit_leaderboard_messages(
                 if is_last and affiliation_image is not None
                 else None
             ),
+            view=join_view,
         )
         if page_id is None:
             # Keep whatever we already synced; leave extras for the next cycle.

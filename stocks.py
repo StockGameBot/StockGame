@@ -5,7 +5,7 @@ import os
 import random
 import string
 import re
-from typing import Any, Optional, Type, cast, get_args
+from typing import Any, Literal, Optional, Type, cast, get_args
 
 # EXTERNAL
 from dateutil.relativedelta import relativedelta
@@ -2356,6 +2356,79 @@ class Frontend: # This will be where a bot (like discord) interacts
         user.change_percent = round((total_change / total_starting_value) * 100, 2) if total_starting_value else 0
         return user
 
+    def get_user_stats(self, user_id: int) -> dtv.UserStatsDetail:
+        """Global stats including recurring podiums and best/worst picks."""
+        user = self.get_user(user_id)
+        recurring_first = recurring_second = recurring_third = 0
+        best_recurring_rank: int | None = None
+        best_recurring_game_name: str | None = None
+        best_pick: tuple[str, float] | None = None
+        worst_pick: tuple[str, float] | None = None
+
+        try:
+            participations = self.be.get_many_participants(user_id=user_id)
+        except LookupError:
+            participations = ()
+
+        for participation in participations:
+            if participation.status == "pending":
+                continue
+            game = self.be.get_game(participation.game_id)
+            if game.status != "ended":
+                continue
+
+            if game.template_id is not None:
+                try:
+                    players = self.be.get_many_participants(
+                        game_id=game.id, status="active", sort_by_value=True,
+                    )
+                except LookupError:
+                    players = ()
+                for rank_idx, player in enumerate(players, start=1):
+                    if player.user_id != user_id:
+                        continue
+                    if rank_idx == 1:
+                        recurring_first += 1
+                    elif rank_idx == 2:
+                        recurring_second += 1
+                    elif rank_idx == 3:
+                        recurring_third += 1
+                    if best_recurring_rank is None or rank_idx < best_recurring_rank:
+                        best_recurring_rank = rank_idx
+                        best_recurring_game_name = game.name
+                    break
+
+            try:
+                picks = self.be.get_many_stock_picks(
+                    participant_id=participation.id,
+                    status=["owned", "sold"],
+                    include_tickers=True,
+                )
+            except LookupError:
+                picks = ()
+            for pick in picks:
+                pct = pick.change_percent
+                if pct is None:
+                    continue
+                ticker = pick.stock_ticker or f"ID({pick.stock_id})"
+                if best_pick is None or pct > best_pick[1]:
+                    best_pick = (ticker, float(pct))
+                if worst_pick is None or pct < worst_pick[1]:
+                    worst_pick = (ticker, float(pct))
+
+        return dtv.UserStatsDetail(
+            user=user,
+            recurring_first=recurring_first,
+            recurring_second=recurring_second,
+            recurring_third=recurring_third,
+            best_stock_ticker=best_pick[0] if best_pick else None,
+            best_stock_percent=round(best_pick[1], 2) if best_pick else None,
+            worst_stock_ticker=worst_pick[0] if worst_pick else None,
+            worst_stock_percent=round(worst_pick[1], 2) if worst_pick else None,
+            best_recurring_rank=best_recurring_rank,
+            best_recurring_game_name=best_recurring_game_name,
+        )
+
     def _user_owns_game(self, user_id:int, game_id:int | str): # Check if a user owns a specific game
         """Check whether a user owns a specific game
 
@@ -2644,6 +2717,127 @@ class Frontend: # This will be where a bot (like discord) interacts
             raise LookupError('Player is not in any games.')
 
         return self._rank_scored_games(scored, today)
+
+    GameResolvePurpose = Literal["portfolio", "buy", "leave", "info"]
+
+    _NO_MATCHING_GAME_MSG = (
+        "No matching game found. Join a game with `/join-game` or check `/my-stocks`."
+    )
+
+    def _participant_row(self, user_id: int, game_id: str | int):
+        try:
+            rows = self.be.get_many_participants(user_id=user_id, game_id=game_id)
+        except LookupError:
+            return None
+        return rows[0] if rows else None
+
+    def _game_eligible_for_purpose(
+        self,
+        user_id: int,
+        game: dtv.Game,
+        purpose: GameResolvePurpose,
+        *,
+        subject_user_id: int | None = None,
+    ) -> bool:
+        if game.status == "ended":
+            return False
+        participant = self._participant_row(user_id, game.id)
+        subject = (
+            self._participant_row(subject_user_id, game.id)
+            if subject_user_id is not None
+            else participant
+        )
+        if purpose == "info":
+            if game.owner_id == user_id:
+                return True
+            if participant is None or participant.status not in ("active", "pending"):
+                return False
+            return True
+        if purpose == "portfolio" and subject_user_id is not None and subject_user_id != user_id:
+            if game.private_game:
+                return False
+            if subject is None or subject.status not in ("active", "pending"):
+                return False
+            return True
+        if participant is None or participant.status not in ("active", "pending"):
+            return False
+        if purpose == "leave":
+            return True
+        if purpose == "portfolio":
+            return True
+        if purpose == "buy":
+            if participant.status != "active":
+                return False
+            if game.pick_date and self.gl._today_et() > game.pick_date:
+                return False
+            remaining, _total = self.pick_capacity(user_id, game.id)
+            return remaining > 0
+        return False
+
+    def resolve_game_id(
+        self,
+        user_id: int,
+        game_id: str | None,
+        *,
+        purpose: GameResolvePurpose,
+        subject_user_id: int | None = None,
+    ) -> str:
+        """Resolve ``game_id`` when omitted, or validate an explicit id for ``purpose``."""
+        self.register(user_id)
+        if game_id is not None:
+            game_id = str(game_id).strip()
+            try:
+                game = self.be.get_game(game_id)
+            except LookupError as exc:
+                raise LookupError(f"No game with ID {game_id}.") from exc
+            if not self._game_eligible_for_purpose(
+                user_id, game, purpose, subject_user_id=subject_user_id,
+            ):
+                raise LookupError(
+                    f"Game **{game_id}** is not eligible for this command."
+                )
+            return str(game.id)
+
+        if purpose == "portfolio" and subject_user_id is not None and subject_user_id != user_id:
+            try:
+                players = self.be.get_many_participants(user_id=subject_user_id)
+            except LookupError as exc:
+                raise LookupError(self._NO_MATCHING_GAME_MSG) from exc
+            matches: list[dtv.Game] = []
+            seen: set[str] = set()
+            for row in players:
+                if row.status not in ("active", "pending"):
+                    continue
+                game = self.be.get_game(row.game_id)
+                key = str(game.id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if self._game_eligible_for_purpose(
+                    user_id, game, purpose, subject_user_id=subject_user_id,
+                ):
+                    matches.append(game)
+        else:
+            try:
+                ranked = self.list_my_games_ranked(user_id, include_ended=False)
+            except LookupError as exc:
+                raise LookupError(self._NO_MATCHING_GAME_MSG) from exc
+            matches = [
+                game
+                for game, _count in ranked
+                if self._game_eligible_for_purpose(
+                    user_id, game, purpose, subject_user_id=subject_user_id,
+                )
+            ]
+        if not matches:
+            raise LookupError(self._NO_MATCHING_GAME_MSG)
+        if len(matches) == 1:
+            return str(matches[0].id)
+        lines = "\n".join(f"- **{g.id}** — {g.name}" for g in matches)
+        raise LookupError(
+            "You're in multiple games — specify `game_id`. Use `/my-games` to see your list.\n"
+            + lines
+        )
     
     def game_info(self, game_id:int | str, show_leaderboard:bool=True) -> dtv.GameInfo: 
         """Get information and leaderboard for a game.
