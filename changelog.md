@@ -27,8 +27,10 @@ First stable release after the beta line (0.2.x).
 
 ### Changed
 
+- Open recurring games post a **join-only** announcement (embed + Join button) to the push channel until the game goes active; leaderboard images follow once play starts
+
 - Leaderboard and portfolio images use guild nicknames with pixel-width clipping (no overlap with other columns)
-- Optional `game_id` on `/buy-stock`, `/remove-stock`, `/my-stocks`, `/game-info`, and `/leave-game` when only one eligible game matches
+- My-stocks **Fund** label is right-aligned in the summary box so long names stay inside the layout
 - User-facing **Fund** terminology replaces Affiliation (internal schema unchanged)
 
 ### Fixed

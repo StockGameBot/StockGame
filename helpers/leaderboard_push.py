@@ -127,6 +127,28 @@ def build_push_embed(
     return embed
 
 
+def build_join_announcement_embed(game) -> discord.Embed:
+    """Embed for a newly opened recurring game (join button, no leaderboard yet)."""
+    if game.pick_date:
+        pick_line = f"**Pick deadline:** {game.pick_date}"
+    else:
+        pick_line = "Buy anytime before the game ends"
+    end = game.end_date if game.end_date else "TBD"
+    embed = discord.Embed(
+        title=f"🎮 New game: {game.name}",
+        description=(
+            f"**Game ID:** `{game.id}`\n"
+            f"**Starts:** {game.start_date}\n"
+            f"**Ends:** {end}\n"
+            f"{pick_line}\n\n"
+            "Press **Join Game** below to enter!"
+        ),
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text=f"Opens for play on {game.start_date}")
+    return embed
+
+
 def collect_player_picks(fe, game_id, user_id: int) -> Optional[list[dict]]:
     """Chip data for one player's holdings, or None when they are not a participant."""
     try:
@@ -638,6 +660,67 @@ async def push_or_edit_leaderboard_messages(
     return serialized
 
 
+async def push_or_edit_join_announcement(
+    *,
+    channel: discord.TextChannel,
+    game,
+    fe,
+) -> Optional[str]:
+    """Post or edit a join-only announcement (embed + button, no leaderboard image)."""
+    from helpers.recurring_join_view import recurring_join_view_for_game
+
+    embed = build_join_announcement_embed(game)
+    view = recurring_join_view_for_game(game)
+    existing = parse_leaderboard_message_ids(getattr(game, "leaderboard_message_id", None))
+    message_id = existing[0] if existing else None
+
+    edit_kwargs: dict[str, Any] = {"embed": embed, "attachments": []}
+    if view is not None:
+        edit_kwargs["view"] = view
+
+    if message_id:
+        try:
+            msg = await channel.fetch_message(int(message_id))
+            await msg.edit(**edit_kwargs)
+            for stale_id in existing[1:]:
+                await _delete_message_quiet(channel, stale_id)
+            if len(existing) > 1:
+                fe.be.update_game(
+                    game_id=game.id,
+                    leaderboard_message_id=str(msg.id),
+                )
+            return str(msg.id)
+        except Exception as exc:
+            if not is_unknown_message_error(exc):
+                logger.warning(
+                    "Join announcement edit failed game=%s msg=%s: %s",
+                    game.id,
+                    message_id,
+                    exc,
+                )
+                return message_id
+            await _delete_message_quiet(channel, message_id)
+
+    try:
+        if view is not None:
+            sent = await channel.send(embed=embed, view=view)
+        else:
+            sent = await channel.send(embed=embed)
+    except Exception as exc:
+        logger.warning("Join announcement send failed for game %s: %s", game.id, exc)
+        return None
+
+    for stale_id in existing[1:]:
+        await _delete_message_quiet(channel, stale_id)
+
+    serialized = str(sent.id)
+    try:
+        fe.be.update_game(game_id=game.id, leaderboard_message_id=serialized)
+    except Exception:
+        logger.exception("Failed to persist join announcement message id for game %s", game.id)
+    return serialized
+
+
 async def push_all_recurring_leaderboards(
     bot: discord.Client,
     fe,
@@ -651,7 +734,7 @@ async def push_all_recurring_leaderboards(
     try:
         games = await asyncio.to_thread(
             fe.be.get_many_games,
-            include_open=False,
+            include_open=True,
             include_active=True,
             include_private=True,
         )
@@ -661,6 +744,8 @@ async def push_all_recurring_leaderboards(
     seen_push_ids: set[str] = set()
     for game in games:
         if not game.template_id:
+            continue
+        if game.status not in ("open", "active"):
             continue
         try:
             template = await asyncio.to_thread(fe.be.get_game_template, game.template_id)
@@ -691,6 +776,14 @@ async def push_all_recurring_leaderboards(
             )
             continue
         try:
+            if game.status == "open":
+                seen_push_ids.add(str(game.id))
+                await push_or_edit_join_announcement(
+                    channel=channel,
+                    game=game,
+                    fe=fe,
+                )
+                continue
             players, owned_pcts = await asyncio.to_thread(collect_push_players, fe, game)
             if name_resolver is not None:
                 for player in players:

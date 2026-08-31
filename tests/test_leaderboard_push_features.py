@@ -436,6 +436,7 @@ def test_push_uses_live_name_resolver():
 
     game = MagicMock()
     game.id = "g1"
+    game.status = "active"
     game.template_id = 7
     template = MagicMock()
     template.push_leaderboard = 1
@@ -468,6 +469,53 @@ def test_push_uses_live_name_resolver():
         asyncio.run(lp.push_all_recurring_leaderboards(bot, fe, name_resolver=resolver))
 
     assert rendered["players"][0]["display_name"] == "LiveName"
+
+
+def test_push_open_game_sends_join_announcement_only():
+    import asyncio
+
+    import helpers.leaderboard_push as lp
+
+    game = MagicMock()
+    game.id = "NEW1"
+    game.name = "Monthly Sep 2026"
+    game.status = "open"
+    game.template_id = 7
+    game.start_date = date(2026, 9, 1)
+    game.end_date = date(2026, 9, 30)
+    game.pick_date = None
+    game.private_game = False
+    game.leaderboard_message_id = None
+
+    template = MagicMock()
+    template.push_leaderboard = 1
+    template.leaderboard_channel_id = "42"
+    template.affiliations_enabled = False
+
+    fe = MagicMock()
+    fe.be.get_many_games.return_value = [game]
+    fe.be.get_game_template.return_value = template
+
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.guild = MagicMock()
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+
+    join_push = AsyncMock(return_value="999")
+    render = MagicMock()
+    lb_push = AsyncMock()
+
+    with patch.object(lp, "push_or_edit_join_announcement", new=join_push), \
+         patch.object(lp, "render_push_pages", new=render), \
+         patch.object(lp, "push_or_edit_leaderboard_messages", new=lb_push), \
+         patch.object(lp, "bot_can_push_to_channel", return_value=True), \
+         patch.object(lp, "collect_push_players") as collect:
+        asyncio.run(lp.push_all_recurring_leaderboards(bot, fe))
+
+    join_push.assert_awaited_once()
+    render.assert_not_called()
+    collect.assert_not_called()
+    lb_push.assert_not_called()
 
 
 def test_fingerprint_push_pages_stable_until_value_changes():
