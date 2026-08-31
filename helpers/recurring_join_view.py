@@ -159,7 +159,7 @@ class RecurringJoinView(discord.ui.View):
 def register_recurring_join_views(bot: discord.Client, fe: Frontend) -> None:
     """Register persistent join views for active public recurring games."""
     try:
-        games = fe.be.get_many_games(status=["open", "active"])
+        games = fe.be.get_many_games(include_open=True, include_active=True, include_ended=False)
     except LookupError:
         return
     seen: set[str] = set()
