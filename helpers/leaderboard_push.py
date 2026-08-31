@@ -528,9 +528,14 @@ async def _upsert_leaderboard_page(
             attachments.append(discord.File(extra_buf, filename=extra_name))
     try:
         if embed is None:
-            sent = await channel.send(files=attachments, view=view)
-        else:
+            if view is not None:
+                sent = await channel.send(files=attachments, view=view)
+            else:
+                sent = await channel.send(files=attachments)
+        elif view is not None:
             sent = await channel.send(embed=embed, files=attachments, view=view)
+        else:
+            sent = await channel.send(embed=embed, files=attachments)
     except Exception as exc:
         logger.warning("Leaderboard page send failed for game %s: %s", game_id, exc)
         return None

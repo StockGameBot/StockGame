@@ -3471,7 +3471,7 @@ async def _resolve_game_id_for_command(
     interaction: discord.Interaction,
     game_id: str | None,
     *,
-    purpose: str,
+    purpose: Frontend.GameResolvePurpose,
     subject_user_id: int | None = None,
 ) -> str | None:
     try:
