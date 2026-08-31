@@ -326,61 +326,86 @@ async def game_info_autocomplete(interaction: Interaction, current: str) -> list
     return await game_id_autocomplete(interaction, current, spec_key="game_info")
 
 
+def _game_id_from_interaction_options(interaction: Interaction) -> str | None:
+    if not interaction.data or "options" not in interaction.data:
+        return None
+    for option in interaction.data.get("options", []):
+        if option.get("name") == "game_id":
+            value = option.get("value")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _game_ids_for_pick_autocomplete(
+    interaction: Interaction,
+    *,
+    purpose: str = "buy",
+) -> list[str]:
+    """Resolve ``game_id`` from slash options or infer a single eligible game."""
+    explicit = _game_id_from_interaction_options(interaction)
+    if explicit:
+        return [explicit]
+    if _fe is None:
+        return []
+    user_id = interaction.user.id
+    try:
+        return [_fe.resolve_game_id(user_id, None, purpose=purpose)]  # type: ignore[arg-type]
+    except LookupError:
+        return _fe.list_game_ids_for_purpose(user_id, purpose=purpose)  # type: ignore[arg-type]
+
+
 async def sell_ticker_autocomplete(
     interaction: Interaction,
     current: str,
 ) -> list[Choice[str]]:
-    """Autocomplete function to show user's stocks for the selected game"""
+    """Autocomplete pending purchases for ``remove-stock`` (and future sell flows)."""
     try:
-        game_id: str | None = None
-        if interaction.data and 'options' in interaction.data:
-            for option in interaction.data.get('options', []):
-                if option['name'] == 'game_id':
-                    value = option.get('value')
-                    game_id = value if isinstance(value, str) else None
-                    break
-
-        if not isinstance(game_id, str) or not game_id:
+        game_ids = _game_ids_for_pick_autocomplete(interaction, purpose="buy")
+        if not game_ids or _fe is None:
             return []
 
-        if _fe is None:
-            return []
+        choices: list[Choice[str]] = []
+        seen_values: set[str] = set()
+        multi_game = len(game_ids) > 1
 
-        user_stocks: tuple[StockPick] = _fe.my_stocks(
-            user_id=interaction.user.id,
-            game_id=game_id,
-            show_pending=True,
-            show_sold=False
-        )
-
-        choices = []
-        seen_tickers = set()
-
-        for stock in user_stocks:
-            ticker: str | None = stock.stock_ticker
-
-            if not isinstance(ticker, str):
+        for game_id in game_ids:
+            try:
+                user_stocks: tuple[StockPick] = _fe.my_stocks(
+                    user_id=interaction.user.id,
+                    game_id=game_id,
+                    show_pending=True,
+                    show_sold=False,
+                )
+            except LookupError:
                 continue
 
-            if ticker in seen_tickers:
-                continue
-            seen_tickers.add(ticker)
+            for stock in user_stocks:
+                if getattr(stock, "status", None) != "pending_buy":
+                    continue
+                ticker: str | None = stock.stock_ticker
+                if not isinstance(ticker, str):
+                    continue
 
-            status_indicator = ""
-            if hasattr(stock, 'status'):
-                if stock.status == 'pending_buy':
-                    status_indicator = " [PENDING BUY]"
+                search_text = ticker.lower()
+                if current.lower() not in search_text:
+                    continue
 
-            display_name: str = ticker + status_indicator
+                value = ticker
+                if value in seen_values:
+                    continue
+                seen_values.add(value)
 
-            search_text = ticker.lower()
-            if current.lower() in search_text:
-                choices.append(Choice(
-                    name=display_name[:100],
-                    value=ticker
-                ))
+                if multi_game:
+                    display_name = f"{ticker} [PENDING BUY] · {game_id}"
+                else:
+                    display_name = f"{ticker} [PENDING BUY]"
 
-        return choices[:25]
+                choices.append(Choice(name=display_name[:100], value=value))
+                if len(choices) >= 25:
+                    return choices
+
+        return choices
 
     except (LookupError, AttributeError):
         return []

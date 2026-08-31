@@ -10,7 +10,7 @@ def test_sell_ticker_autocomplete_accepts_string_game_ids():
     calls = []
     fake_frontend = SimpleNamespace(
         my_stocks=lambda **kwargs: calls.append(kwargs) or (
-            SimpleNamespace(stock_ticker="AAPL", status="owned"),
+            SimpleNamespace(stock_ticker="AAPL", status="pending_buy"),
         )
     )
     autocomplete.init_autocomplete(fake_frontend)
@@ -27,7 +27,51 @@ def test_sell_ticker_autocomplete_accepts_string_game_ids():
         "show_pending": True,
         "show_sold": False,
     }]
-    assert [(choice.name, choice.value) for choice in choices] == [("AAPL", "AAPL")]
+    assert [(choice.name, choice.value) for choice in choices] == [("AAPL [PENDING BUY]", "AAPL")]
+
+
+def test_sell_ticker_autocomplete_resolves_single_game_when_game_id_omitted():
+    calls = []
+    fake_frontend = SimpleNamespace(
+        resolve_game_id=lambda user_id, game_id, purpose: "SOLO1",
+        list_game_ids_for_purpose=lambda *_args, **_kwargs: ["SOLO1"],
+        my_stocks=lambda **kwargs: calls.append(kwargs) or (
+            SimpleNamespace(stock_ticker="GOVT", status="pending_buy"),
+        ),
+    )
+    autocomplete.init_autocomplete(fake_frontend)
+    interaction = SimpleNamespace(
+        data={"options": [{"name": "ticker", "value": "G"}]},
+        user=SimpleNamespace(id=42),
+    )
+
+    choices = asyncio.run(autocomplete.sell_ticker_autocomplete(interaction, "GO"))
+
+    assert calls[0]["game_id"] == "SOLO1"
+    assert choices[0].value == "GOVT"
+
+
+def test_sell_ticker_autocomplete_lists_pending_across_games_when_multiple():
+    calls = []
+
+    def my_stocks(**kwargs):
+        calls.append(kwargs)
+        if kwargs["game_id"] == "G1":
+            return (SimpleNamespace(stock_ticker="GOVT", status="pending_buy"),)
+        return (SimpleNamespace(stock_ticker="IAU", status="pending_buy"),)
+
+    fake_frontend = SimpleNamespace(
+        resolve_game_id=lambda *_a, **_k: (_ for _ in ()).throw(LookupError("many")),
+        list_game_ids_for_purpose=lambda *_a, **_k: ["G1", "G2"],
+        my_stocks=my_stocks,
+    )
+    autocomplete.init_autocomplete(fake_frontend)
+    interaction = SimpleNamespace(data={"options": []}, user=SimpleNamespace(id=42))
+
+    choices = asyncio.run(autocomplete.sell_ticker_autocomplete(interaction, ""))
+
+    assert {c.value for c in choices} == {"GOVT", "IAU"}
+    assert any("G1" in c.name for c in choices)
 
 
 def test_buy_ticker_autocomplete_includes_typed_ticker_not_in_db():

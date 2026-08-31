@@ -2838,6 +2838,23 @@ class Frontend: # This will be where a bot (like discord) interacts
             "You're in multiple games — specify `game_id`. Use `/my-games` to see your list.\n"
             + lines
         )
+
+    def list_game_ids_for_purpose(
+        self,
+        user_id: int,
+        purpose: GameResolvePurpose,
+    ) -> list[str]:
+        """All non-ended games matching ``purpose`` (for autocomplete when ``game_id`` is omitted)."""
+        self.register(user_id)
+        try:
+            ranked = self.list_my_games_ranked(user_id, include_ended=False)
+        except LookupError:
+            return []
+        return [
+            str(game.id)
+            for game, _count in ranked
+            if self._game_eligible_for_purpose(user_id, game, purpose)
+        ]
     
     def game_info(self, game_id:int | str, show_leaderboard:bool=True) -> dtv.GameInfo: 
         """Get information and leaderboard for a game.
