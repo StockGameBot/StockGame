@@ -710,11 +710,28 @@ class StockPortfolioImageGenerator:
         draw.text((col2_x, row2_y + 20), f"${money_left:,.2f}", fill=self.colors['text'], font=self.fonts['header'])
 
         if fund_label:
+            col3_right = summary_rect[2] - 20
+            max_fund_width = max(col3_right - col3_x, 40)
             fund_text = self._truncate_to_width(
-                draw, fund_label, self.fonts['header'], max_width=180,
+                draw, fund_label, self.fonts['header'], max_width=max_fund_width,
             )
-            draw.text((col3_x, row2_y), "Fund:", fill=self.colors['text'], font=self.fonts['text'])
-            draw.text((col3_x, row2_y + 20), fund_text, fill=self.colors['text'], font=self.fonts['header'])
+            label = "Fund:"
+            label_bbox = draw.textbbox((0, 0), label, font=self.fonts['text'])
+            label_w = label_bbox[2] - label_bbox[0]
+            fund_bbox = draw.textbbox((0, 0), fund_text, font=self.fonts['header'])
+            fund_w = fund_bbox[2] - fund_bbox[0]
+            draw.text(
+                (col3_right - label_w, row2_y),
+                label,
+                fill=self.colors['text'],
+                font=self.fonts['text'],
+            )
+            draw.text(
+                (col3_right - fund_w, row2_y + 20),
+                fund_text,
+                fill=self.colors['text'],
+                font=self.fonts['header'],
+            )
         
         return y_offset + 110
     
