@@ -2909,7 +2909,7 @@ async def remove_stock(
 ):
     await interaction.response.defer(ephemeral=ephemeral_test)
     resolved = await _resolve_game_id_for_command(
-        interaction, game_id, purpose="buy",
+        interaction, game_id, purpose="remove_pick",
     )
     if resolved is None:
         return

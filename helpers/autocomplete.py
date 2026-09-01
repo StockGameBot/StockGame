@@ -361,7 +361,7 @@ async def sell_ticker_autocomplete(
 ) -> list[Choice[str]]:
     """Autocomplete pending purchases for ``remove-stock`` (and future sell flows)."""
     try:
-        game_ids = _game_ids_for_pick_autocomplete(interaction, purpose="buy")
+        game_ids = _game_ids_for_pick_autocomplete(interaction, purpose="remove_pick")
         if not game_ids or _fe is None:
             return []
 

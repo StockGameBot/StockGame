@@ -15,6 +15,7 @@ SQLite schema versions match `db_schema.db_ver`. **Beta** began with [PR #162](h
 ### Fixed
 
 - `/remove-stock` ticker autocomplete resolves `game_id` when omitted (single eligible game) or lists pending picks across games when several match
+- `/remove-stock` no longer treats full pick slots as ineligible — games with pending purchases remain valid even when no buy slots remain
 
 ## [1.0.0] - 2026-08-30
 

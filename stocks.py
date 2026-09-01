@@ -2718,7 +2718,7 @@ class Frontend: # This will be where a bot (like discord) interacts
 
         return self._rank_scored_games(scored, today)
 
-    GameResolvePurpose = Literal["portfolio", "buy", "leave", "info"]
+    GameResolvePurpose = Literal["portfolio", "buy", "remove_pick", "leave", "info"]
 
     _NO_MATCHING_GAME_MSG = (
         "No matching game found. Join a game with `/join-game` or check `/my-stocks`."
@@ -2772,6 +2772,16 @@ class Frontend: # This will be where a bot (like discord) interacts
                 return False
             remaining, _total = self.pick_capacity(user_id, game.id)
             return remaining > 0
+        if purpose == "remove_pick":
+            if participant.status != "active":
+                return False
+            try:
+                self.be.get_many_stock_picks(
+                    participant_id=participant.id, status=["pending_buy"],
+                )
+            except LookupError:
+                return False
+            return True
         return False
 
     def resolve_game_id(
