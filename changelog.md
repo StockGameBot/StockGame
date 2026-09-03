@@ -10,12 +10,17 @@ SQLite schema versions match `db_schema.db_ver`. **Beta** began with [PR #162](h
 
 ### Added
 
+- `scripts/revert_imcc_repair.py` — manually undo the IMCC 1:30 startup repair (dry-run by default)
+- `scripts/list_corporate_actions.py` — print Alpaca corporate actions for a given date
+
 ### Changed
 
 ### Fixed
 
 - `/remove-stock` ticker autocomplete resolves `game_id` when omitted (single eligible game) or lists pending picks across games when several match
 - `/remove-stock` no longer treats full pick slots as ineligible — games with pending purchases remain valid even when no buy slots remain
+- Removed automatic one-time repairs on bot startup (IMCC split repair, LWFN6 end-date fix); use manual scripts instead
+- Corporate-action splits skip picks bought on/after Alpaca `ex_date` so post-split purchases are not divided again; staging logs split symbols
 
 ## [1.0.0] - 2026-08-30
 

@@ -521,22 +521,11 @@ async def on_ready():
         scheduled_game_update.start()
     if not scheduled_ca_staging.is_running():
         scheduled_ca_staging.start()
-    # IMCC one-time repair if applicable
-    try:
-        from helpers import corporate_actions as ca
-        await asyncio.to_thread(ca.repair_imcc_2026_08_27, fe.be, fe.gl.alpaca)
-    except Exception:
-        logger.exception('IMCC split repair skipped due to error')
     try:
         from helpers.recurring_join_view import register_recurring_join_views
         register_recurring_join_views(bot, fe)
     except Exception:
         logger.exception('Failed to register recurring join views')
-    try:
-        from helpers import startup_fixes
-        await asyncio.to_thread(startup_fixes.run_startup_fixes, fe.be)
-    except Exception:
-        logger.exception('Startup fixes skipped due to error')
     # Keep the equity universe current without delaying command sync.
     asyncio.create_task(_seed_sp500_on_startup())
     try:

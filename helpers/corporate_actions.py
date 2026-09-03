@@ -33,6 +33,7 @@ class StageReport:
     delistings: int = 0
     picks_staged: int = 0
     runtime_sec: float = 0.0
+    split_symbols: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -109,6 +110,63 @@ def _stock_by_ticker(be: "Backend", symbol: str):
         return None
 
 
+def _parse_ca_date(raw: Any) -> Optional[date]:
+    if raw is None:
+        return None
+    if isinstance(raw, date):
+        return raw
+    text = str(raw).strip()
+    if not text:
+        return None
+    return date.fromisoformat(text[:10])
+
+
+def _parse_pick_created_date(pick: Any) -> Optional[date]:
+    """Return the calendar date a pick was created (ET-agnostic date portion)."""
+    from datetime import datetime
+
+    raw = getattr(pick, "datetime_created", None)
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return raw.date()
+    if isinstance(raw, date):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        return datetime.strptime(raw.strip()[:10], "%Y-%m-%d").date()
+    return None
+
+
+def _pick_should_receive_split(
+    pick: Any,
+    trade_date: date,
+    share_factor: float,
+    *,
+    ex_date: Optional[date] = None,
+) -> bool:
+    """Skip picks bought on/after ex-date or already badged (post-split buys)."""
+    if share_factor >= 1:
+        return True
+    label = getattr(pick, "event_label", None)
+    if isinstance(label, str) and "Split" in label:
+        return False
+    created = _parse_pick_created_date(pick)
+    effective = ex_date or trade_date
+    if created is not None and created >= effective:
+        return False
+    return True
+
+
+def summarize_corporate_actions_for_date(
+    alpaca: AlpacaMarketData,
+    trade_date: date,
+) -> dict[str, list[dict[str, Any]]]:
+    """Fetch Alpaca corporate actions for ``trade_date`` (empty dict if unavailable)."""
+    if not alpaca.configured:
+        return {}
+    return alpaca.fetch_corporate_actions_for_date(trade_date)
+
+
 def _owned_picks_for_stock(be: "Backend", stock_id: int) -> list[Any]:
     import helpers.datatype_validation as dtv
 
@@ -177,16 +235,24 @@ def stage_corporate_actions(
             continue
         split_type = "forward_split"
         share_factor = new_rate / old_rate
+        ex_date = _parse_ca_date(item.get("ex_date") or item.get("process_date"))
         payload = json.dumps(
             {
                 "old_rate": old_rate,
                 "new_rate": new_rate,
                 "split_type": split_type,
                 "badge": format_split_badge(old_rate, new_rate, split_type),
+                "ex_date": ex_date.isoformat() if ex_date else None,
             }
         )
         picks = _owned_picks_for_stock(be, stock.id)
-        for pick in picks:
+        eligible = [
+            p for p in picks
+            if _pick_should_receive_split(
+                p, trade_date, share_factor, ex_date=ex_date,
+            )
+        ]
+        for pick in eligible:
             be.insert_staged_corporate_action(
                 alpaca_ca_id=str(ca_id),
                 action_type=split_type,
@@ -199,6 +265,15 @@ def stage_corporate_actions(
             )
             report.picks_staged += 1
         report.splits += 1
+        report.split_symbols.append(to_db_ticker(str(symbol)))
+        logger.info(
+            "CA staging: %s %s (ca_id=%s) eligible_picks=%s/%s",
+            split_type,
+            to_db_ticker(str(symbol)),
+            ca_id,
+            len(eligible),
+            len(picks),
+        )
 
     for item in _ca_list(ca_data, "reverse_splits"):
         symbol = item.get("symbol")
@@ -214,16 +289,24 @@ def stage_corporate_actions(
             continue
         split_type = "reverse_split"
         share_factor = new_rate / old_rate
+        ex_date = _parse_ca_date(item.get("ex_date") or item.get("process_date"))
         payload = json.dumps(
             {
                 "old_rate": old_rate,
                 "new_rate": new_rate,
                 "split_type": split_type,
                 "badge": format_split_badge(old_rate, new_rate, split_type),
+                "ex_date": ex_date.isoformat() if ex_date else None,
             }
         )
         picks = _owned_picks_for_stock(be, stock.id)
-        for pick in picks:
+        eligible = [
+            p for p in picks
+            if _pick_should_receive_split(
+                p, trade_date, share_factor, ex_date=ex_date,
+            )
+        ]
+        for pick in eligible:
             be.insert_staged_corporate_action(
                 alpaca_ca_id=str(ca_id),
                 action_type=split_type,
@@ -236,6 +319,15 @@ def stage_corporate_actions(
             )
             report.picks_staged += 1
         report.splits += 1
+        report.split_symbols.append(to_db_ticker(str(symbol)))
+        logger.info(
+            "CA staging: %s %s (ca_id=%s) eligible_picks=%s/%s",
+            split_type,
+            to_db_ticker(str(symbol)),
+            ca_id,
+            len(eligible),
+            len(picks),
+        )
 
     for item in ca_data.get("name_changes") or []:
         old_sym = item.get("old_symbol")
@@ -337,9 +429,10 @@ def stage_corporate_actions(
 
     report.runtime_sec = time.perf_counter() - start
     logger.info(
-        "CA staging complete: splits=%s name_changes=%s mergers=%s delistings=%s "
-        "picks_staged=%s runtime=%.2fs",
+        "CA staging complete: splits=%s split_symbols=%s name_changes=%s mergers=%s "
+        "delistings=%s picks_staged=%s runtime=%.2fs",
         report.splits,
+        report.split_symbols or "none",
         report.name_changes,
         report.mergers,
         report.delistings,
@@ -425,8 +518,15 @@ def apply_staged_corporate_actions(
             if pick.shares is None:
                 continue
             payload = json.loads(row.get("payload") or "{}")
+            share_factor = float(share_factor)
+            ex_date = _parse_ca_date(payload.get("ex_date")) or trade_date
+            if not _pick_should_receive_split(
+                pick, trade_date, share_factor, ex_date=ex_date,
+            ):
+                report.skipped_already_applied += 1
+                continue
             badge = payload.get("badge", "")
-            new_shares = pick.shares * float(share_factor)
+            new_shares = pick.shares * share_factor
             be.update_stock_pick(
                 pick_id=pick.id,
                 shares=new_shares,
@@ -553,35 +653,3 @@ def apply_staged_corporate_actions(
 def _ensure_stock(gl: "GameLogic", ticker: str):
     resolved = gl.find_stock(ticker)
     return gl.be.get_stock(resolved)
-
-
-def repair_imcc_2026_08_27(be: "Backend", alpaca: AlpacaMarketData) -> int:
-    """One-time idempotent IMCC 1:30 reverse split repair."""
-    from datetime import date as date_cls
-
-    trade_date = date_cls(2026, 8, 27)
-    ca_id = "d05a02a4-a1af-4c06-997f-2d124966852c"
-    if be.is_corporate_action_applied(ca_id):
-        return 0
-    try:
-        stock = be.get_stock("IMCC")
-    except LookupError:
-        return 0
-    factor = 1.0 / 30.0
-    badge = format_split_badge(30, 1, "reverse_split")
-    fixed = 0
-    for pick in _owned_picks_for_stock(be, stock.id):
-        if pick.shares is None or pick.shares < 100:
-            continue
-        be.update_stock_pick(
-            pick_id=pick.id,
-            shares=pick.shares * factor,
-            event_label=badge,
-        )
-        fixed += 1
-    if fixed:
-        be.record_applied_corporate_action(
-            ca_id, "reverse_split", stock.id, trade_date.isoformat()
-        )
-        logger.warning("IMCC repair: adjusted %s pick(s)", fixed)
-    return fixed
