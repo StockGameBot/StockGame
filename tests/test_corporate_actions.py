@@ -103,7 +103,7 @@ def test_apply_reverse_split_updates_shares(be, mocker):
         stock_id=stock.id,
         pick_id=picks[0].id,
         share_factor=1 / 30,
-        payload='{"badge": "' + payload + '"}',
+        payload='{"badge": "' + payload + '", "ex_date": "2026-08-26"}',
         trade_date=trade_date.isoformat(),
         datetime_staged="2026-08-27 09:00:00",
     )
@@ -352,4 +352,84 @@ def test_buy_stock_outcome_delisted_message(fe, mocker):
     status, _title, description = db._buy_stock_outcome(owner_id, game_id, "DEAD")
     assert status == "failed"
     assert "delisted" in description.lower()
+
+
+def test_pick_should_receive_split_skips_post_ex_date_purchase():
+    from types import SimpleNamespace
+
+    pick = SimpleNamespace(
+        datetime_created="2026-09-02 12:00:00",
+        event_label=None,
+        shares=300.0,
+        start_value=1000.0,
+    )
+    assert not ca._pick_should_receive_split(
+        pick,
+        date(2026, 9, 3),
+        1 / 30,
+        ex_date=date(2026, 8, 27),
+    )
+
+
+def test_pick_should_receive_split_allows_pre_ex_date_purchase():
+    from types import SimpleNamespace
+
+    pick = SimpleNamespace(
+        datetime_created="2026-08-20 12:00:00",
+        event_label=None,
+        shares=9000.0,
+        start_value=1000.0,
+    )
+    assert ca._pick_should_receive_split(
+        pick,
+        date(2026, 8, 27),
+        1 / 30,
+        ex_date=date(2026, 8, 27),
+    )
+
+
+def test_stage_corporate_actions_skips_post_ex_date_owned_pick(be, mocker):
+    be.add_stock("IMCC", "nasdaq", "IM Cannabis")
+    stock = be.get_stock("IMCC")
+    be.add_user(1, "discord", "player")
+    game_id = be.add_game(1, "G", "2026-09-01", starting_money=1000, total_picks=1)
+    be.add_participant(1, game_id, force_active=True)
+    participant = be.get_many_participants(user_id=1, game_id=game_id)[0]
+    be.add_stock_pick(participant.id, stock.id)
+    picks = be.get_many_stock_picks(participant_id=participant.id)
+    be.update_stock_pick(
+        pick_id=picks[0].id,
+        shares=294.0,
+        start_value=1000.0,
+        current_value=1000.0,
+        status="owned",
+    )
+    be.sql.update(
+        table="stock_picks",
+        filters={"pick_id": picks[0].id},
+        items={"datetime_created": "2026-09-02 10:00:00"},
+    )
+    trade_date = date(2026, 9, 3)
+
+    class FakeAlpaca:
+        configured = True
+
+        def fetch_corporate_actions_for_date(self, _date):
+            return {
+                "reverse_splits": [
+                    {
+                        "id": "ca-imcc-sep",
+                        "symbol": "IMCC",
+                        "old_rate": 30,
+                        "new_rate": 1,
+                        "ex_date": "2026-08-27",
+                        "process_date": "2026-09-03",
+                    }
+                ]
+            }
+
+    report = ca.stage_corporate_actions(be, FakeAlpaca(), trade_date, force_if_empty=True)
+    assert report.splits == 1
+    assert report.split_symbols == ["IMCC"]
+    assert report.picks_staged == 0
 
