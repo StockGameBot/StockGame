@@ -1,6 +1,6 @@
 discord.py==2.7.1
 python-dotenv==1.2.1
-pydantic==2.12.5
+pydantic==2.13.5
 pytz==2025.2
 python-dateutil==2.9.0.post0
 Pillow==12.1.0
