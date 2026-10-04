@@ -322,6 +322,23 @@ async def leaderboard_games_autocomplete(
     return await game_id_autocomplete(interaction, current, spec_key="leaderboard")
 
 
+async def fund_autocomplete(
+    interaction: Interaction,
+    current: str,
+) -> list[Choice[str]]:
+    """Suggest cosmetic fund names, including Independent."""
+    from helpers.affiliations import AFFILIATION_DISPLAY, AFFILIATION_EMBED_ORDER
+
+    query = current.strip().lower()
+    choices: list[Choice[str]] = []
+    for key in AFFILIATION_EMBED_ORDER:
+        label = AFFILIATION_DISPLAY[key]
+        if query and query not in label.lower() and query not in key:
+            continue
+        choices.append(Choice(name=label, value=key))
+    return choices
+
+
 async def game_info_autocomplete(interaction: Interaction, current: str) -> list[Choice[str]]:
     return await game_id_autocomplete(interaction, current, spec_key="game_info")
 

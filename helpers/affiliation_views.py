@@ -14,7 +14,7 @@ from helpers.affiliations import (
     AFFILIATION_DISPLAY,
     AFFILIATION_KEYS,
     AFFILIATION_WORKING_CLASS,
-    AFFILIATION_WARNING,
+    fund_choice_prompt,
     is_affiliations_enabled,
     normalize_affiliation,
 )
@@ -24,7 +24,7 @@ SelectCallback = Callable[[discord.Interaction, str | None], Awaitable[None]]
 
 def _affiliation_label(key: str | None) -> str:
     if key is None:
-        return "Independent (solo fund)"
+        return "Independent (no badge)"
     return AFFILIATION_DISPLAY.get(key, key)
 
 
@@ -34,25 +34,29 @@ class AffiliationSelect(discord.ui.Select):
     def __init__(self, *, on_chosen: Optional[SelectCallback] = None) -> None:
         options = [
             discord.SelectOption(
-                label="Independent (solo fund)",
+                label="Independent (no badge)",
                 value="__none__",
-                description="No fund — play on your own",
+                description="Cosmetic — same picks and odds as everyone else",
             ),
             discord.SelectOption(
                 label=AFFILIATION_DISPLAY[AFFILIATION_ATRIOC],
                 value=AFFILIATION_ATRIOC,
+                description="Cosmetic badge only",
             ),
             discord.SelectOption(
                 label=AFFILIATION_DISPLAY[AFFILIATION_DOUGDOUG],
                 value=AFFILIATION_DOUGDOUG,
+                description="Cosmetic badge only",
             ),
             discord.SelectOption(
                 label=AFFILIATION_DISPLAY[AFFILIATION_AIDEN],
                 value=AFFILIATION_AIDEN,
+                description="Cosmetic badge only",
             ),
             discord.SelectOption(
                 label=AFFILIATION_DISPLAY[AFFILIATION_WORKING_CLASS],
                 value=AFFILIATION_WORKING_CLASS,
+                description="Cosmetic badge only",
             ),
         ]
         super().__init__(
@@ -94,7 +98,8 @@ class AffiliationSelect(discord.ui.Select):
         await interaction.response.edit_message(
             content=(
                 f"✅ Fund set to **{label}** for game **#{view.game_id}**.\n"
-                f"{AFFILIATION_WARNING}"
+                "**Cosmetic only.** This does not change your picks or your chances of winning. "
+                "You cannot switch funds after this."
             ),
             view=view,
         )
@@ -156,10 +161,7 @@ async def maybe_send_affiliation_prompt(
         game_id=str(game.id),
     )
     await interaction.followup.send(
-        content=(
-            f"Pick your fund for **{game.name}** (#{game.id}):\n\n"
-            f"{AFFILIATION_WARNING}"
-        ),
+        content=fund_choice_prompt(f"{game.name} (#{game.id})"),
         view=view,
         ephemeral=ephemeral,
     )

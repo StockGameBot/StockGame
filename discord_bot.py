@@ -36,7 +36,14 @@ from helpers.leaderboard_push import (
 from helpers.recurring_top_roles import sync_recurring_top_roles, strip_template_top_roles
 from helpers.recurring_leaderboard_image import get_recurring_generator
 from helpers import game_invites as gi
-from helpers.affiliations import AFFILIATION_WARNING, format_dollar_gain, is_affiliations_enabled
+from helpers.affiliations import (
+    AFFILIATION_DISPLAY,
+    canonical_fund_filter,
+    fund_choice_prompt,
+    format_dollar_gain,
+    is_affiliations_enabled,
+    participant_in_fund,
+)
 from helpers import affiliation_views as av
 import helpers.autocomplete as ac
 from helpers.logging_setup import (
@@ -1442,7 +1449,7 @@ class LeaderboardChannelSelect(discord.ui.View):
     exclusive_picks="Enable exclusive picks: each stock can only be picked once (optional, default: False)",
     push_leaderboard="Post/edit a live leaderboard image in a channel (default: False)",
     auto_top_roles="Assign 1st/2nd/3rd roles when each game ends (default: False)",
-    affiliations_enabled="Enable hedge-fund teams / funds (default: False)",
+    affiliations_enabled="Enable cosmetic fund badges (default: False)",
 )
 async def create_recurring_game(
     interaction: discord.Interaction,
@@ -3092,7 +3099,7 @@ class PortfolioShareView(discord.ui.View):
             on_chosen=self._on_affiliation_chosen,
         )
         await interaction.response.send_message(
-            content=f"Pick your fund for game **#{self.game_id}**:\n\n{AFFILIATION_WARNING}",
+            content=fund_choice_prompt(f"game #{self.game_id}"),
             view=view,
             ephemeral=True,
         )
@@ -3147,6 +3154,7 @@ class UserLeaderboardView(discord.ui.View):
         show_game_controls: bool = True,
         show_affiliation_button: bool = False,
         affiliation_game_id: str | None = None,
+        fund: str | None = None,
     ):
         super().__init__(timeout=600)
         self.interaction = interaction
@@ -3156,6 +3164,7 @@ class UserLeaderboardView(discord.ui.View):
         self.show_game_controls = show_game_controls
         self.show_affiliation_button = show_affiliation_button
         self.affiliation_game_id = affiliation_game_id
+        self.fund = fund
         self.affiliation_chosen_games: set[str] = set()
         self._sync_buttons()
 
@@ -3296,10 +3305,7 @@ class UserLeaderboardView(discord.ui.View):
             on_chosen=self._on_affiliation_chosen,
         )
         await interaction.response.send_message(
-            content=(
-                f"Pick your fund for game **#{self.affiliation_game_id}**:\n\n"
-                f"{AFFILIATION_WARNING}"
-            ),
+            content=fund_choice_prompt(f"game #{self.affiliation_game_id}"),
             view=view,
             ephemeral=True,
         )
@@ -3388,6 +3394,7 @@ class UserLeaderboardView(discord.ui.View):
             self.current_game["leaderboard"],
             self.interaction.guild,
             self.rank_page_index,
+            fund=self.fund,
         )
 
     async def _edit(self, interaction: discord.Interaction) -> None:
@@ -3525,6 +3532,8 @@ async def _build_rank_page(
     leaderboard: list[GameLeaderboard],
     guild: discord.Guild | None,
     page_index: int,
+    *,
+    fund: str | None = None,
 ) -> dict:
     """Render one requested rank page, or reuse its cached PNG."""
     recurring = getattr(game, "template_id", None) is not None
@@ -3539,6 +3548,8 @@ async def _build_rank_page(
     rank_end = start + len(entries) if entries else 0
     filename = f"leaderboard_{game.id}_{page_index + 1}.png"
     cache_key = f"{game.id}:{page_index}"
+    if fund:
+        cache_key = f"{cache_key}:{fund}"
 
     processed: list[dict] = []
     for rank, entry in enumerate(entries, start=rank_start):
@@ -3570,6 +3581,11 @@ async def _build_rank_page(
         "status": game.status,
         "affiliations_enabled": affiliations_on,
     }
+    if fund:
+        from helpers.affiliations import AFFILIATION_DISPLAY
+
+        label = AFFILIATION_DISPLAY.get(fund, fund)
+        game_data["name"] = f"{game.name} — {label}"
     png = await asyncio.to_thread(
         _cached_game_info_leaderboard_png,
         cache_key,
@@ -3786,14 +3802,34 @@ def _leaderboard_browse_games(user_id: int) -> list[tuple[Any, int]]:
 
 
 @bot.tree.command(name="leaderboard", description="View leaderboards for your games or another public game")
-@app_commands.autocomplete(game_id=ac.leaderboard_games_autocomplete)
-@app_commands.describe(game_id="Optional game name or ID; leave blank to browse your games")
+@app_commands.autocomplete(
+    game_id=ac.leaderboard_games_autocomplete,
+    fund=ac.fund_autocomplete,
+)
+@app_commands.describe(
+    game_id="Optional game name or ID; leave blank to browse your games",
+    fund="Optional fund to show, including Independent. Cosmetic filter only",
+)
 async def leaderboard_cmd(
     interaction: discord.Interaction,
     game_id: str | None = None,
+    fund: str | None = None,
 ):
     await interaction.response.defer(ephemeral=ephemeral_test)
     user_id = interaction.user.id
+    try:
+        fund_key = canonical_fund_filter(fund)
+    except ValueError:
+        await interaction.followup.send(
+            embed=simple_embed(
+                status="failed",
+                title="Unknown fund",
+                desc="Pick a fund from the suggestions, including Independent.",
+            ),
+            ephemeral=ephemeral_test,
+        )
+        return
+    fund_label = AFFILIATION_DISPLAY.get(fund_key) if fund_key else None
     if game_id:
         try:
             selected_game = await asyncio.to_thread(fe.be.get_game, game_id)
@@ -3813,6 +3849,16 @@ async def leaderboard_cmd(
                     status="failed",
                     title="Private game",
                     desc="You do not have access to this private game's leaderboard.",
+                ),
+                ephemeral=ephemeral_test,
+            )
+            return
+        if fund_key and not is_affiliations_enabled(fe.be, selected_game):
+            await interaction.followup.send(
+                embed=simple_embed(
+                    status="failed",
+                    title="No funds in this game",
+                    desc="This game does not use fund badges, so it cannot be filtered by fund.",
                 ),
                 ephemeral=ephemeral_test,
             )
@@ -3844,34 +3890,57 @@ async def leaderboard_cmd(
 
     games: list[dict] = []
     for game, _player_count in ranked:
+        if fund_key and not is_affiliations_enabled(fe.be, game):
+            continue
         try:
             info = await asyncio.to_thread(fe.game_info, game.id, True)
         except Exception:
             continue
         leaderboard = info.leaderboard or []
+        if fund_key:
+            leaderboard = [
+                entry
+                for entry in leaderboard
+                if participant_in_fund(getattr(entry, "affiliation", None), fund_key)
+            ]
         rank_desc = (
             "You're not participating in this game."
             if game_id
             else "You're not on the board yet."
         )
+        if fund_key and not any(entry.user_id == user_id for entry in leaderboard):
+            rank_desc = f"You're not in the **{fund_label}** fund."
         for i, entry in enumerate(leaderboard, start=1):
             if entry.user_id == user_id:
                 d_chg = float(entry.change_dollars or 0)
                 p_chg = float(entry.change_percent or 0)
-                rank_desc = f"Your rank: **#{i}** | {format_dollar_gain(d_chg)} ({p_chg:+.2f}%)"
+                rank_desc = (
+                    f"Your rank in **{fund_label}**: **#{i}** | {format_dollar_gain(d_chg)} ({p_chg:+.2f}%)"
+                    if fund_label
+                    else f"Your rank: **#{i}** | {format_dollar_gain(d_chg)} ({p_chg:+.2f}%)"
+                )
                 break
+        title = f"{game.name} [{game.id}]"
+        if fund_label:
+            title = f"{title} — {fund_label}"
         games.append(
             _leaderboard_game_data(
                 game,
                 leaderboard,
-                title=f"{game.name} [{game.id}]",
+                title=title,
                 description=rank_desc,
             )
         )
 
     if not games:
+        empty_desc = "No games with leaderboard data."
+        if fund_key:
+            empty_desc = (
+                f"No games with the **{fund_label}** fund to show. "
+                "Fund filters only apply to games that use fund badges."
+            )
         await interaction.followup.send(
-            embed=simple_embed(status="failed", title="No leaderboards", desc="No games with leaderboard data."),
+            embed=simple_embed(status="failed", title="No leaderboards", desc=empty_desc),
             ephemeral=ephemeral_test,
         )
         return
@@ -3880,6 +3949,7 @@ async def leaderboard_cmd(
         interaction,
         games,
         show_game_controls=game_id is None,
+        fund=fund_key,
     )
     await view.prepare()
     embed, file = view._page_payload()

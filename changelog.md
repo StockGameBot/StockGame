@@ -17,6 +17,8 @@ SQLite schema versions match `db_schema.db_ver`. **Beta** began with [PR #162](h
 
 - Custom-game slash commands (`/create-game`, `/create-game-advanced`, `/invite`, `/manage-game`, `/delete-game`, `/manage-pending`, `/kick-player`) default to administrator-only in Discord Integrations so `@everyone` does not see them
 - `/help` lists those custom-game commands only for moderators
+- Fund join prompts state that the choice is cosmetic and does not change picks or chances of winning
+- `/leaderboard` accepts an optional autofilled `fund` filter, including Independent
 
 ### Fixed
 

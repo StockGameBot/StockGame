@@ -162,7 +162,7 @@ def test_leaderboard_view_only_builds_pages_when_visited(mocker):
             },
         ]
 
-        async def build(game, _leaderboard, _guild, page_index):
+        async def build(game, _leaderboard, _guild, page_index, fund=None):
             start = page_index * 15 + 1
             return _rank_page(page_index + 1, start, start)
 

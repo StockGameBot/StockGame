@@ -49,6 +49,16 @@ def test_normalize_affiliation():
     assert normalize_affiliation("atrioc") == AFFILIATION_ATRIOC
 
 
+def test_participant_in_fund_includes_independent():
+    from helpers.affiliations import INDEPENDENT_KEY, participant_in_fund
+
+    assert participant_in_fund(None, INDEPENDENT_KEY)
+    assert participant_in_fund("independent", "Independent")
+    assert not participant_in_fund(AFFILIATION_ATRIOC, INDEPENDENT_KEY)
+    assert participant_in_fund(AFFILIATION_ATRIOC, "atrioc")
+    assert not participant_in_fund(None, AFFILIATION_ATRIOC)
+
+
 def test_aggregate_affiliation_stats_groups_players():
     participants = [
         SimpleNamespace(
