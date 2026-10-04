@@ -36,7 +36,19 @@ from helpers.leaderboard_push import (
 from helpers.recurring_top_roles import sync_recurring_top_roles, strip_template_top_roles
 from helpers.recurring_leaderboard_image import get_recurring_generator
 from helpers import game_invites as gi
-from helpers.affiliations import AFFILIATION_WARNING, format_dollar_gain, is_affiliations_enabled
+from helpers.affiliations import (
+    AFFILIATION_DISPLAY,
+    canonical_fund_filter,
+    fund_choice_prompt,
+    format_dollar_gain,
+    is_affiliations_enabled,
+    participant_in_fund,
+)
+from helpers.stock_leaderboard import (
+    STOCK_BOARD_PAGE_SIZE,
+    build_stock_board,
+    format_stock_board_field,
+)
 from helpers import affiliation_views as av
 import helpers.autocomplete as ac
 from helpers.logging_setup import (
@@ -541,6 +553,7 @@ async def on_ready():
 # GAME INTERACTION RELATED
 
 @bot.tree.command(name="create-game-advanced", description="Create a new stock game without a wizard")
+@app_commands.default_permissions()
 @app_commands.describe(
     name="Name of the game",
     start_date="Game start date (YYYY-MM-DD). Does not by itself stop buying.",
@@ -1004,6 +1017,7 @@ async def _finalize_wizard_game_creation(
 # this code is a complete mess at the moment, trying to get it to work my way but it is taking more time than it's worth
 # THIS ITERATION IS WORKING IN THE CURRENT STATE
 @bot.tree.command(name="create-game", description="Guided setup for stock game creation")
+@app_commands.default_permissions()
 async def create_game(interaction: discord.Interaction):
     # Create the initial embed
     embed = discord.Embed(
@@ -1440,7 +1454,7 @@ class LeaderboardChannelSelect(discord.ui.View):
     exclusive_picks="Enable exclusive picks: each stock can only be picked once (optional, default: False)",
     push_leaderboard="Post/edit a live leaderboard image in a channel (default: False)",
     auto_top_roles="Assign 1st/2nd/3rd roles when each game ends (default: False)",
-    affiliations_enabled="Enable hedge-fund teams / funds (default: False)",
+    affiliations_enabled="Enable cosmetic fund badges (default: False)",
 )
 async def create_recurring_game(
     interaction: discord.Interaction,
@@ -1685,6 +1699,7 @@ async def join_game(
             pass
 
 @bot.tree.command(name="delete-game", description="Delete a game (Owner/Admin) - with confirmation")
+@app_commands.default_permissions()
 @app_commands.autocomplete(game_id=ac.owner_games_autocomplete)
 @app_commands.describe(
     game_id="The game ID to delete"
@@ -1756,6 +1771,7 @@ async def delete_game(
     confirm_view.message = await interaction.original_response()
 
 @bot.tree.command(name="manage-game", description="Manage an existing stock game")
+@app_commands.default_permissions()
 @app_commands.autocomplete(game_id=ac.owner_games_autocomplete)
 @app_commands.describe(
     game_id="ID of the game to update",
@@ -1851,6 +1867,7 @@ async def manage_game(
     await interaction.response.send_message(embed=embed, ephemeral=ephemeral_test)
 
 @bot.tree.command(name="invite", description="Invite a user to a game (requires their DMs from this server)")
+@app_commands.default_permissions()
 @app_commands.autocomplete(game_id=ac.all_games_autocomplete)
 @app_commands.describe(
     game_id="ID of the game to invite them to",
@@ -1961,6 +1978,7 @@ async def invite_user(
         await interaction.followup.send(embed=error_embed, ephemeral=ephemeral_test)
 
 @bot.tree.command(name="manage-pending", description="Approve or deny pending users for your private game")
+@app_commands.default_permissions()
 @app_commands.autocomplete(game_id=ac.owner_games_autocomplete)
 @app_commands.describe(
     game_id="ID of the game to manage pending users for"
@@ -2007,6 +2025,7 @@ async def manage_pending(
         await interaction.followup.send(embed=embed, ephemeral=ephemeral_test)
   
 @bot.tree.command(name="kick-player", description="Kick a player from your private game")
+@app_commands.default_permissions()
 @app_commands.autocomplete(game_id=ac.private_owner_games_autocomplete)
 @app_commands.describe(
     game_id="Private game ID",
@@ -3085,7 +3104,7 @@ class PortfolioShareView(discord.ui.View):
             on_chosen=self._on_affiliation_chosen,
         )
         await interaction.response.send_message(
-            content=f"Pick your fund for game **#{self.game_id}**:\n\n{AFFILIATION_WARNING}",
+            content=fund_choice_prompt(f"game #{self.game_id}"),
             view=view,
             ephemeral=True,
         )
@@ -3140,6 +3159,7 @@ class UserLeaderboardView(discord.ui.View):
         show_game_controls: bool = True,
         show_affiliation_button: bool = False,
         affiliation_game_id: str | None = None,
+        fund: str | None = None,
     ):
         super().__init__(timeout=600)
         self.interaction = interaction
@@ -3149,6 +3169,7 @@ class UserLeaderboardView(discord.ui.View):
         self.show_game_controls = show_game_controls
         self.show_affiliation_button = show_affiliation_button
         self.affiliation_game_id = affiliation_game_id
+        self.fund = fund
         self.affiliation_chosen_games: set[str] = set()
         self._sync_buttons()
 
@@ -3289,10 +3310,7 @@ class UserLeaderboardView(discord.ui.View):
             on_chosen=self._on_affiliation_chosen,
         )
         await interaction.response.send_message(
-            content=(
-                f"Pick your fund for game **#{self.affiliation_game_id}**:\n\n"
-                f"{AFFILIATION_WARNING}"
-            ),
+            content=fund_choice_prompt(f"game #{self.affiliation_game_id}"),
             view=view,
             ephemeral=True,
         )
@@ -3381,6 +3399,7 @@ class UserLeaderboardView(discord.ui.View):
             self.current_game["leaderboard"],
             self.interaction.guild,
             self.rank_page_index,
+            fund=self.fund,
         )
 
     async def _edit(self, interaction: discord.Interaction) -> None:
@@ -3518,6 +3537,8 @@ async def _build_rank_page(
     leaderboard: list[GameLeaderboard],
     guild: discord.Guild | None,
     page_index: int,
+    *,
+    fund: str | None = None,
 ) -> dict:
     """Render one requested rank page, or reuse its cached PNG."""
     recurring = getattr(game, "template_id", None) is not None
@@ -3532,6 +3553,8 @@ async def _build_rank_page(
     rank_end = start + len(entries) if entries else 0
     filename = f"leaderboard_{game.id}_{page_index + 1}.png"
     cache_key = f"{game.id}:{page_index}"
+    if fund:
+        cache_key = f"{cache_key}:{fund}"
 
     processed: list[dict] = []
     for rank, entry in enumerate(entries, start=rank_start):
@@ -3563,6 +3586,11 @@ async def _build_rank_page(
         "status": game.status,
         "affiliations_enabled": affiliations_on,
     }
+    if fund:
+        from helpers.affiliations import AFFILIATION_DISPLAY
+
+        label = AFFILIATION_DISPLAY.get(fund, fund)
+        game_data["name"] = f"{game.name} — {label}"
     png = await asyncio.to_thread(
         _cached_game_info_leaderboard_png,
         cache_key,
@@ -3779,9 +3807,298 @@ def _leaderboard_browse_games(user_id: int) -> list[tuple[Any, int]]:
 
 
 @bot.tree.command(name="leaderboard", description="View leaderboards for your games or another public game")
-@app_commands.autocomplete(game_id=ac.leaderboard_games_autocomplete)
-@app_commands.describe(game_id="Optional game name or ID; leave blank to browse your games")
+@app_commands.autocomplete(
+    game_id=ac.leaderboard_games_autocomplete,
+    fund=ac.fund_autocomplete,
+)
+@app_commands.describe(
+    game_id="Optional game name or ID; leave blank to browse your games",
+    fund="Optional fund to show, including Independent. Cosmetic filter only",
+)
 async def leaderboard_cmd(
+    interaction: discord.Interaction,
+    game_id: str | None = None,
+    fund: str | None = None,
+):
+    await interaction.response.defer(ephemeral=ephemeral_test)
+    user_id = interaction.user.id
+    try:
+        fund_key = canonical_fund_filter(fund)
+    except ValueError:
+        await interaction.followup.send(
+            embed=simple_embed(
+                status="failed",
+                title="Unknown fund",
+                desc="Pick a fund from the suggestions, including Independent.",
+            ),
+            ephemeral=ephemeral_test,
+        )
+        return
+    fund_label = AFFILIATION_DISPLAY.get(fund_key) if fund_key else None
+    if game_id:
+        try:
+            selected_game = await asyncio.to_thread(fe.be.get_game, game_id)
+        except LookupError:
+            await interaction.followup.send(
+                embed=simple_embed(
+                    status="failed",
+                    title="Game not found",
+                    desc=f"No game with ID `{game_id}` exists.",
+                ),
+                ephemeral=ephemeral_test,
+            )
+            return
+        if not await asyncio.to_thread(_user_can_view_leaderboard, selected_game, user_id):
+            await interaction.followup.send(
+                embed=simple_embed(
+                    status="failed",
+                    title="Private game",
+                    desc="You do not have access to this private game's leaderboard.",
+                ),
+                ephemeral=ephemeral_test,
+            )
+            return
+        if fund_key and not is_affiliations_enabled(fe.be, selected_game):
+            await interaction.followup.send(
+                embed=simple_embed(
+                    status="failed",
+                    title="No funds in this game",
+                    desc="This game does not use fund badges, so it cannot be filtered by fund.",
+                ),
+                ephemeral=ephemeral_test,
+            )
+            return
+        ranked = [(selected_game, 0)]
+    else:
+        try:
+            ranked = await asyncio.to_thread(_leaderboard_browse_games, user_id)
+        except Exception as exc:
+            logger.exception("leaderboard failed | user=%s", user_id, exc_info=exc)
+            await interaction.followup.send(
+                embed=simple_embed(status="failed", title="Error", desc="Could not load your games."),
+                ephemeral=ephemeral_test,
+            )
+            return
+        if not ranked:
+            await interaction.followup.send(
+                embed=simple_embed(
+                    status="failed",
+                    title="No games",
+                    desc=(
+                        "There are no personal or recurring public leaderboards to browse. "
+                        "You can still enter another public game with `/leaderboard game_id:`."
+                    ),
+                ),
+                ephemeral=ephemeral_test,
+            )
+            return
+
+    games: list[dict] = []
+    for game, _player_count in ranked:
+        if fund_key and not is_affiliations_enabled(fe.be, game):
+            continue
+        try:
+            info = await asyncio.to_thread(fe.game_info, game.id, True)
+        except Exception:
+            continue
+        leaderboard = info.leaderboard or []
+        if fund_key:
+            leaderboard = [
+                entry
+                for entry in leaderboard
+                if participant_in_fund(getattr(entry, "affiliation", None), fund_key)
+            ]
+        rank_desc = (
+            "You're not participating in this game."
+            if game_id
+            else "You're not on the board yet."
+        )
+        if fund_key and not any(entry.user_id == user_id for entry in leaderboard):
+            rank_desc = f"You're not in the **{fund_label}** fund."
+        for i, entry in enumerate(leaderboard, start=1):
+            if entry.user_id == user_id:
+                d_chg = float(entry.change_dollars or 0)
+                p_chg = float(entry.change_percent or 0)
+                rank_desc = (
+                    f"Your rank in **{fund_label}**: **#{i}** | {format_dollar_gain(d_chg)} ({p_chg:+.2f}%)"
+                    if fund_label
+                    else f"Your rank: **#{i}** | {format_dollar_gain(d_chg)} ({p_chg:+.2f}%)"
+                )
+                break
+        title = f"{game.name} [{game.id}]"
+        if fund_label:
+            title = f"{title} — {fund_label}"
+        games.append(
+            _leaderboard_game_data(
+                game,
+                leaderboard,
+                title=title,
+                description=rank_desc,
+            )
+        )
+
+    if not games:
+        empty_desc = "No games with leaderboard data."
+        if fund_key:
+            empty_desc = (
+                f"No games with the **{fund_label}** fund to show. "
+                "Fund filters only apply to games that use fund badges."
+            )
+        await interaction.followup.send(
+            embed=simple_embed(status="failed", title="No leaderboards", desc=empty_desc),
+            ephemeral=ephemeral_test,
+        )
+        return
+
+    view = UserLeaderboardView(
+        interaction,
+        games,
+        show_game_controls=game_id is None,
+        fund=fund_key,
+    )
+    await view.prepare()
+    embed, file = view._page_payload()
+    await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=ephemeral_test)
+
+
+def _stock_board_entries(game_id: str):
+    """Priced picks for one game, grouped for the text stock board."""
+    return build_stock_board(fe.be.list_priced_stock_picks(game_id))
+
+
+class StockLeaderboardView(discord.ui.View):
+    """Page through a text leaderboard of stocks players have picked."""
+
+    def __init__(
+        self,
+        interaction: discord.Interaction,
+        games: list[dict],
+        *,
+        show_game_controls: bool = True,
+    ):
+        super().__init__(timeout=600)
+        self.interaction = interaction
+        self.games = games
+        self.game_index = 0
+        self.page_index = 0
+        self.show_game_controls = show_game_controls
+        self._sync_buttons()
+
+    @property
+    def current_game(self) -> dict:
+        return self.games[self.game_index]
+
+    @property
+    def page_count(self) -> int:
+        count = len(self.current_game["entries"])
+        if count <= 0:
+            return 1
+        return (count + STOCK_BOARD_PAGE_SIZE - 1) // STOCK_BOARD_PAGE_SIZE
+
+    def _sync_buttons(self) -> None:
+        self.clear_items()
+        on_first_page = self.page_index <= 0
+        on_last_page = self.page_index >= self.page_count - 1
+        previous_page = discord.ui.Button(
+            label="Previous page",
+            style=discord.ButtonStyle.secondary,
+            disabled=on_first_page,
+            row=0,
+        )
+        next_page = discord.ui.Button(
+            label="Next page",
+            style=discord.ButtonStyle.secondary,
+            disabled=on_last_page,
+            row=0,
+        )
+        previous_page.callback = self._previous_page  # type: ignore[method-assign]
+        next_page.callback = self._next_page  # type: ignore[method-assign]
+        self.add_item(previous_page)
+        self.add_item(next_page)
+        if self.show_game_controls and len(self.games) > 1:
+            previous_game = discord.ui.Button(
+                label="Previous game",
+                style=discord.ButtonStyle.blurple,
+                disabled=self.game_index <= 0,
+                row=1,
+            )
+            next_game = discord.ui.Button(
+                label="Next game",
+                style=discord.ButtonStyle.blurple,
+                disabled=self.game_index >= len(self.games) - 1,
+                row=1,
+            )
+            previous_game.callback = self._previous_game  # type: ignore[method-assign]
+            next_game.callback = self._next_game  # type: ignore[method-assign]
+            self.add_item(previous_game)
+            self.add_item(next_game)
+
+    def embed(self) -> discord.Embed:
+        game = self.current_game
+        entries = game["entries"]
+        embed = discord.Embed(
+            title=f"Stock picks • {game['title']}",
+            color=discord.Color.blurple(),
+        )
+        start = self.page_index * STOCK_BOARD_PAGE_SIZE
+        page = entries[start : start + STOCK_BOARD_PAGE_SIZE]
+        if not page:
+            embed.description = "No priced stock picks in this game yet."
+        else:
+            for offset, entry in enumerate(page, start=1):
+                name, value = format_stock_board_field(entry, start + offset)
+                embed.add_field(name=name, value=value, inline=False)
+        footer = []
+        if self.show_game_controls and len(self.games) > 1:
+            footer.append(f"Game {self.game_index + 1} of {len(self.games)}")
+        footer.append(f"Page {self.page_index + 1} of {self.page_count}")
+        embed.set_footer(text=" | ".join(footer))
+        return embed
+
+    def _needs_controls(self) -> bool:
+        return self.page_count > 1 or (self.show_game_controls and len(self.games) > 1)
+
+    async def _edit(self, interaction: discord.Interaction) -> None:
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    async def _previous_page(self, interaction: discord.Interaction) -> None:
+        self.page_index = max(0, self.page_index - 1)
+        await self._edit(interaction)
+
+    async def _next_page(self, interaction: discord.Interaction) -> None:
+        self.page_index = min(self.page_count - 1, self.page_index + 1)
+        await self._edit(interaction)
+
+    async def _previous_game(self, interaction: discord.Interaction) -> None:
+        self.game_index = max(0, self.game_index - 1)
+        self.page_index = 0
+        await self._edit(interaction)
+
+    async def _next_game(self, interaction: discord.Interaction) -> None:
+        self.game_index = min(len(self.games) - 1, self.game_index + 1)
+        self.page_index = 0
+        await self._edit(interaction)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.interaction.user.id:
+            return True
+        await interaction.response.send_message("Only you can flip these pages.", ephemeral=True)
+        return False
+
+    async def on_timeout(self) -> None:
+        await _disable_expired_view(self, self.interaction)
+
+
+@bot.tree.command(
+    name="stock-leaderboard",
+    description="Rank the stocks players have picked in a game",
+)
+@app_commands.autocomplete(game_id=ac.leaderboard_games_autocomplete)
+@app_commands.describe(
+    game_id="Optional game name or ID; leave blank to browse your games",
+)
+async def stock_leaderboard_cmd(
     interaction: discord.Interaction,
     game_id: str | None = None,
 ):
@@ -3815,7 +4132,7 @@ async def leaderboard_cmd(
         try:
             ranked = await asyncio.to_thread(_leaderboard_browse_games, user_id)
         except Exception as exc:
-            logger.exception("leaderboard failed | user=%s", user_id, exc_info=exc)
+            logger.exception("stock leaderboard failed | user=%s", user_id, exc_info=exc)
             await interaction.followup.send(
                 embed=simple_embed(status="failed", title="Error", desc="Could not load your games."),
                 ephemeral=ephemeral_test,
@@ -3828,7 +4145,7 @@ async def leaderboard_cmd(
                     title="No games",
                     desc=(
                         "There are no personal or recurring public leaderboards to browse. "
-                        "You can still enter another public game with `/leaderboard game_id:`."
+                        "You can still enter another public game with `/stock-leaderboard game_id:`."
                     ),
                 ),
                 ephemeral=ephemeral_test,
@@ -3838,45 +4155,38 @@ async def leaderboard_cmd(
     games: list[dict] = []
     for game, _player_count in ranked:
         try:
-            info = await asyncio.to_thread(fe.game_info, game.id, True)
+            entries = await asyncio.to_thread(_stock_board_entries, str(game.id))
         except Exception:
+            logger.exception("stock leaderboard failed to load game %s", game.id)
             continue
-        leaderboard = info.leaderboard or []
-        rank_desc = (
-            "You're not participating in this game."
-            if game_id
-            else "You're not on the board yet."
-        )
-        for i, entry in enumerate(leaderboard, start=1):
-            if entry.user_id == user_id:
-                d_chg = float(entry.change_dollars or 0)
-                p_chg = float(entry.change_percent or 0)
-                rank_desc = f"Your rank: **#{i}** | {format_dollar_gain(d_chg)} ({p_chg:+.2f}%)"
-                break
         games.append(
-            _leaderboard_game_data(
-                game,
-                leaderboard,
-                title=f"{game.name} [{game.id}]",
-                description=rank_desc,
-            )
+            {
+                "title": f"{game.name} [{game.id}]",
+                "entries": entries,
+            }
         )
 
     if not games:
         await interaction.followup.send(
-            embed=simple_embed(status="failed", title="No leaderboards", desc="No games with leaderboard data."),
+            embed=simple_embed(
+                status="failed",
+                title="No leaderboards",
+                desc="No games with stock-pick data.",
+            ),
             ephemeral=ephemeral_test,
         )
         return
 
-    view = UserLeaderboardView(
+    view = StockLeaderboardView(
         interaction,
         games,
         show_game_controls=game_id is None,
     )
-    await view.prepare()
-    embed, file = view._page_payload()
-    await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=ephemeral_test)
+    payload = view.embed()
+    if view._needs_controls():
+        await interaction.followup.send(embed=payload, view=view, ephemeral=ephemeral_test)
+    else:
+        await interaction.followup.send(embed=payload, ephemeral=ephemeral_test)
 
 
 def _participant_for_game(user_id: int, game_id: str):
@@ -4549,8 +4859,6 @@ def _quick_start_help_embed() -> discord.Embed:
 
 def _regular_help_embed(
     *,
-    owns_game: bool = False,
-    owns_private_game: bool = False,
     moderator: bool = False,
 ) -> discord.Embed:
     embed = discord.Embed(
@@ -4576,38 +4884,25 @@ def _regular_help_embed(
             "`/remove-stock` - Cancel a purchase that is still pending.\n"
             "`/my-stocks` - View your portfolio, performance, and current rank.\n"
             "`/leaderboard` - Browse rankings for your games or accessible games.\n"
+            "`/stock-leaderboard` - Rank the stocks players picked, 10 per page. Optional `game_id`.\n"
             "`/user-stats` - View your or another player's overall statistics."
         ),
         inline=False,
     )
-    embed.add_field(
-        name="Create games",
-        value=(
-            "`/create-game` - Build a game with a guided setup.\n"
-            "`/create-game-advanced` - Create a game by entering every setting directly."
-        ),
-        inline=False,
-    )
-    if owns_game:
-        embed.add_field(
-            name="Game owner commands",
-            value=(
-                "`/invite` - Invite someone to your game through Discord.\n"
-                "`/manage-game` - Change settings on an existing game you own.\n"
-                "`/delete-game` - Permanently delete a game you own."
-            ),
-            inline=False,
-        )
-    if owns_private_game:
-        embed.add_field(
-            name="Private game commands",
-            value=(
-                "`/manage-pending` - Approve or deny requests to join a private game.\n"
-                "`/kick-player` - Remove a player from your private game."
-            ),
-            inline=False,
-        )
     if moderator:
+        embed.add_field(
+            name="Custom games",
+            value=(
+                "`/create-game` - Build a game with a guided setup.\n"
+                "`/create-game-advanced` - Create a game by entering every setting directly.\n"
+                "`/invite` - Invite someone to a game through Discord.\n"
+                "`/manage-game` - Change settings on an existing game.\n"
+                "`/delete-game` - Permanently delete a game.\n"
+                "`/manage-pending` - Approve or deny requests to join a private game.\n"
+                "`/kick-player` - Remove a player from a private game."
+            ),
+            inline=False,
+        )
         embed.add_field(
             name="Moderator tools",
             value=(
@@ -4665,13 +4960,9 @@ class QuickStartHelpView(InitiatorOnlyView):
         self,
         initiator_id: int,
         *,
-        owns_game: bool,
-        owns_private_game: bool,
         moderator: bool,
     ):
         super().__init__(initiator_id, timeout=300)
-        self.owns_game = owns_game
-        self.owns_private_game = owns_private_game
         self.moderator = moderator
 
     @discord.ui.button(label="Advanced", style=discord.ButtonStyle.secondary)
@@ -4681,11 +4972,7 @@ class QuickStartHelpView(InitiatorOnlyView):
         _button: discord.ui.Button,
     ):
         await interaction.response.edit_message(
-            embed=_regular_help_embed(
-                owns_game=self.owns_game,
-                owns_private_game=self.owns_private_game,
-                moderator=self.moderator,
-            ),
+            embed=_regular_help_embed(moderator=self.moderator),
             view=None,
         )
 
@@ -4701,17 +4988,12 @@ class QuickStartHelpView(InitiatorOnlyView):
 @bot.tree.command(name="help", description="Get help with StockBot")
 async def help(interaction: discord.Interaction):
     moderator = is_moderator(interaction)
-    owns_game, owns_private_game = await asyncio.to_thread(
-        fe.user_owns_any_game, interaction.user.id
-    )
     show_quick_start = await asyncio.to_thread(
         _should_show_quick_start, interaction.user.id
     )
     if show_quick_start:
         view = QuickStartHelpView(
             interaction.user.id,
-            owns_game=owns_game,
-            owns_private_game=owns_private_game,
             moderator=moderator,
         )
         await interaction.response.send_message(
@@ -4726,11 +5008,7 @@ async def help(interaction: discord.Interaction):
         return
 
     await interaction.response.send_message(
-        embed=_regular_help_embed(
-            owns_game=owns_game,
-            owns_private_game=owns_private_game,
-            moderator=moderator,
-        ),
+        embed=_regular_help_embed(moderator=moderator),
         ephemeral=ephemeral_test,
     )
 

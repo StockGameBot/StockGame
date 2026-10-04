@@ -66,9 +66,11 @@ def test_regular_help_base_omits_owner_and_moderator_commands():
     embed = db._regular_help_embed()
     content = "\n".join(str(field.value) for field in embed.fields)
 
-    for command in ("/join-game", "/buy-stock", "/leaderboard", "/create-game"):
+    for command in ("/join-game", "/buy-stock", "/leaderboard"):
         assert command in content
     for command in (
+        "/create-game",
+        "/create-game-advanced",
         "/manage-game",
         "/invite",
         "/delete-game",
@@ -80,17 +82,15 @@ def test_regular_help_base_omits_owner_and_moderator_commands():
         assert command not in content
 
 
-def test_regular_help_appends_owner_private_and_moderator_sections():
+def test_regular_help_appends_custom_game_and_moderator_sections():
     import discord_bot as db
 
-    embed = db._regular_help_embed(
-        owns_game=True,
-        owns_private_game=True,
-        moderator=True,
-    )
+    embed = db._regular_help_embed(moderator=True)
     content = "\n".join(str(field.value) for field in embed.fields)
 
     for command in (
+        "/create-game",
+        "/create-game-advanced",
         "/invite",
         "/manage-game",
         "/delete-game",
@@ -107,12 +107,7 @@ def test_advanced_button_replaces_quick_start_with_regular_help():
     import discord_bot as db
 
     async def run():
-        view = db.QuickStartHelpView(
-            10,
-            owns_game=True,
-            owns_private_game=False,
-            moderator=False,
-        )
+        view = db.QuickStartHelpView(10, moderator=False)
         button = next(
             item
             for item in view.children
@@ -127,9 +122,9 @@ def test_advanced_button_replaces_quick_start_with_regular_help():
 
         kwargs = interaction.response.edit_message.await_args.kwargs
         assert kwargs["embed"].title == "Stock Game Bot - Command Guide"
-        assert "/manage-game" in "\n".join(
-            str(field.value) for field in kwargs["embed"].fields
-        )
+        content = "\n".join(str(field.value) for field in kwargs["embed"].fields)
+        assert "/buy-stock" in content
+        assert "/manage-game" not in content
         assert kwargs["view"] is None
 
     asyncio.run(run())

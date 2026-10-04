@@ -42,10 +42,16 @@ _ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets" / "affiliations"
 _ICON_CACHE: dict[tuple[str, int], Image.Image] = {}
 
 AFFILIATION_WARNING = (
-    "**Important:** Your **fund choice** is permanent once selected and **cannot be changed** "
-    "after the game has started.\n"
-    "If you stay unassigned, you may still pick a fund mid-game — but you **cannot switch funds** afterward."
+    "**Cosmetic only.** A fund is a name and badge on the leaderboard. "
+    "It does **not** change your stock picks, your portfolio, or your chances of winning.\n"
+    "**Permanent:** once you choose, you **cannot switch**. "
+    "You can skip for now and choose later, but you still cannot change it after that."
 )
+
+
+def fund_choice_prompt(game_label: str) -> str:
+    """Player-facing prompt before the fund dropdown."""
+    return f"Choose a fund for **{game_label}**.\n\n{AFFILIATION_WARNING}"
 
 
 def format_dollar_gain(amount: float) -> str:
@@ -65,6 +71,29 @@ def normalize_affiliation(value: str | None) -> str | None:
     if key not in AFFILIATION_KEYS:
         raise ValueError(f"Invalid affiliation: {value}")
     return key
+
+
+def canonical_fund_filter(value: str | None) -> str | None:
+    """Normalize a leaderboard fund filter, or None when no filter was given."""
+    if value is None or str(value).strip() == "":
+        return None
+    key = str(value).strip().lower()
+    if key in ("none", "independent", "null"):
+        return INDEPENDENT_KEY
+    if key not in AFFILIATION_KEYS:
+        raise ValueError(f"Unknown fund: {value}")
+    return key
+
+
+def participant_in_fund(affiliation: str | None, fund: str) -> bool:
+    """True when a player's stored affiliation matches a fund filter."""
+    selected = canonical_fund_filter(fund)
+    if selected is None:
+        return True
+    stored = normalize_affiliation(affiliation)
+    if selected == INDEPENDENT_KEY:
+        return stored is None
+    return stored == selected
 
 
 def hedge_fund_name(key: str | None) -> str:

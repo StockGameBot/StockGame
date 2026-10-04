@@ -339,3 +339,12 @@ def test_leaderboard_autocomplete_searches_name_and_id():
 
     assert [choice.value for choice in by_name] == ["ZXCVB"]
     assert [choice.value for choice in by_id] == ["ZXCVB"]
+
+
+def test_fund_autocomplete_lists_independent_and_filters():
+    all_funds = asyncio.run(autocomplete.fund_autocomplete(SimpleNamespace(), ""))
+    assert "independent" in {choice.value for choice in all_funds}
+    assert len(all_funds) == 5
+
+    narrowed = asyncio.run(autocomplete.fund_autocomplete(SimpleNamespace(), "work"))
+    assert [choice.value for choice in narrowed] == ["working_class"]
