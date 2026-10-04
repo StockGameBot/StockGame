@@ -541,6 +541,7 @@ async def on_ready():
 # GAME INTERACTION RELATED
 
 @bot.tree.command(name="create-game-advanced", description="Create a new stock game without a wizard")
+@app_commands.default_permissions()
 @app_commands.describe(
     name="Name of the game",
     start_date="Game start date (YYYY-MM-DD). Does not by itself stop buying.",
@@ -1004,6 +1005,7 @@ async def _finalize_wizard_game_creation(
 # this code is a complete mess at the moment, trying to get it to work my way but it is taking more time than it's worth
 # THIS ITERATION IS WORKING IN THE CURRENT STATE
 @bot.tree.command(name="create-game", description="Guided setup for stock game creation")
+@app_commands.default_permissions()
 async def create_game(interaction: discord.Interaction):
     # Create the initial embed
     embed = discord.Embed(
@@ -1685,6 +1687,7 @@ async def join_game(
             pass
 
 @bot.tree.command(name="delete-game", description="Delete a game (Owner/Admin) - with confirmation")
+@app_commands.default_permissions()
 @app_commands.autocomplete(game_id=ac.owner_games_autocomplete)
 @app_commands.describe(
     game_id="The game ID to delete"
@@ -1756,6 +1759,7 @@ async def delete_game(
     confirm_view.message = await interaction.original_response()
 
 @bot.tree.command(name="manage-game", description="Manage an existing stock game")
+@app_commands.default_permissions()
 @app_commands.autocomplete(game_id=ac.owner_games_autocomplete)
 @app_commands.describe(
     game_id="ID of the game to update",
@@ -1851,6 +1855,7 @@ async def manage_game(
     await interaction.response.send_message(embed=embed, ephemeral=ephemeral_test)
 
 @bot.tree.command(name="invite", description="Invite a user to a game (requires their DMs from this server)")
+@app_commands.default_permissions()
 @app_commands.autocomplete(game_id=ac.all_games_autocomplete)
 @app_commands.describe(
     game_id="ID of the game to invite them to",
@@ -1961,6 +1966,7 @@ async def invite_user(
         await interaction.followup.send(embed=error_embed, ephemeral=ephemeral_test)
 
 @bot.tree.command(name="manage-pending", description="Approve or deny pending users for your private game")
+@app_commands.default_permissions()
 @app_commands.autocomplete(game_id=ac.owner_games_autocomplete)
 @app_commands.describe(
     game_id="ID of the game to manage pending users for"
@@ -2007,6 +2013,7 @@ async def manage_pending(
         await interaction.followup.send(embed=embed, ephemeral=ephemeral_test)
   
 @bot.tree.command(name="kick-player", description="Kick a player from your private game")
+@app_commands.default_permissions()
 @app_commands.autocomplete(game_id=ac.private_owner_games_autocomplete)
 @app_commands.describe(
     game_id="Private game ID",
@@ -4549,8 +4556,6 @@ def _quick_start_help_embed() -> discord.Embed:
 
 def _regular_help_embed(
     *,
-    owns_game: bool = False,
-    owns_private_game: bool = False,
     moderator: bool = False,
 ) -> discord.Embed:
     embed = discord.Embed(
@@ -4580,34 +4585,20 @@ def _regular_help_embed(
         ),
         inline=False,
     )
-    embed.add_field(
-        name="Create games",
-        value=(
-            "`/create-game` - Build a game with a guided setup.\n"
-            "`/create-game-advanced` - Create a game by entering every setting directly."
-        ),
-        inline=False,
-    )
-    if owns_game:
-        embed.add_field(
-            name="Game owner commands",
-            value=(
-                "`/invite` - Invite someone to your game through Discord.\n"
-                "`/manage-game` - Change settings on an existing game you own.\n"
-                "`/delete-game` - Permanently delete a game you own."
-            ),
-            inline=False,
-        )
-    if owns_private_game:
-        embed.add_field(
-            name="Private game commands",
-            value=(
-                "`/manage-pending` - Approve or deny requests to join a private game.\n"
-                "`/kick-player` - Remove a player from your private game."
-            ),
-            inline=False,
-        )
     if moderator:
+        embed.add_field(
+            name="Custom games",
+            value=(
+                "`/create-game` - Build a game with a guided setup.\n"
+                "`/create-game-advanced` - Create a game by entering every setting directly.\n"
+                "`/invite` - Invite someone to a game through Discord.\n"
+                "`/manage-game` - Change settings on an existing game.\n"
+                "`/delete-game` - Permanently delete a game.\n"
+                "`/manage-pending` - Approve or deny requests to join a private game.\n"
+                "`/kick-player` - Remove a player from a private game."
+            ),
+            inline=False,
+        )
         embed.add_field(
             name="Moderator tools",
             value=(
@@ -4665,13 +4656,9 @@ class QuickStartHelpView(InitiatorOnlyView):
         self,
         initiator_id: int,
         *,
-        owns_game: bool,
-        owns_private_game: bool,
         moderator: bool,
     ):
         super().__init__(initiator_id, timeout=300)
-        self.owns_game = owns_game
-        self.owns_private_game = owns_private_game
         self.moderator = moderator
 
     @discord.ui.button(label="Advanced", style=discord.ButtonStyle.secondary)
@@ -4681,11 +4668,7 @@ class QuickStartHelpView(InitiatorOnlyView):
         _button: discord.ui.Button,
     ):
         await interaction.response.edit_message(
-            embed=_regular_help_embed(
-                owns_game=self.owns_game,
-                owns_private_game=self.owns_private_game,
-                moderator=self.moderator,
-            ),
+            embed=_regular_help_embed(moderator=self.moderator),
             view=None,
         )
 
@@ -4701,17 +4684,12 @@ class QuickStartHelpView(InitiatorOnlyView):
 @bot.tree.command(name="help", description="Get help with StockBot")
 async def help(interaction: discord.Interaction):
     moderator = is_moderator(interaction)
-    owns_game, owns_private_game = await asyncio.to_thread(
-        fe.user_owns_any_game, interaction.user.id
-    )
     show_quick_start = await asyncio.to_thread(
         _should_show_quick_start, interaction.user.id
     )
     if show_quick_start:
         view = QuickStartHelpView(
             interaction.user.id,
-            owns_game=owns_game,
-            owns_private_game=owns_private_game,
             moderator=moderator,
         )
         await interaction.response.send_message(
@@ -4726,11 +4704,7 @@ async def help(interaction: discord.Interaction):
         return
 
     await interaction.response.send_message(
-        embed=_regular_help_embed(
-            owns_game=owns_game,
-            owns_private_game=owns_private_game,
-            moderator=moderator,
-        ),
+        embed=_regular_help_embed(moderator=moderator),
         ephemeral=ephemeral_test,
     )
 

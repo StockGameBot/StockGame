@@ -15,6 +15,9 @@ SQLite schema versions match `db_schema.db_ver`. **Beta** began with [PR #162](h
 
 ### Changed
 
+- Custom-game slash commands (`/create-game`, `/create-game-advanced`, `/invite`, `/manage-game`, `/delete-game`, `/manage-pending`, `/kick-player`) default to administrator-only in Discord Integrations so `@everyone` does not see them
+- `/help` lists those custom-game commands only for moderators
+
 ### Fixed
 
 - `/remove-stock` ticker autocomplete resolves `game_id` when omitted (single eligible game) or lists pending picks across games when several match
