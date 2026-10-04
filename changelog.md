@@ -12,6 +12,7 @@ SQLite schema versions match `db_schema.db_ver`. **Beta** began with [PR #162](h
 
 - `scripts/revert_imcc_repair.py` — manually undo the IMCC 1:30 startup repair (dry-run by default)
 - `scripts/list_corporate_actions.py` — print Alpaca corporate actions for a given date
+- `/stock-leaderboard` lists priced stock picks as text, 10 per page. Same-ticker picks within 0.5 percentage points share one row and drop the fund label
 
 ### Changed
 

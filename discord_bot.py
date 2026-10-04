@@ -44,6 +44,11 @@ from helpers.affiliations import (
     is_affiliations_enabled,
     participant_in_fund,
 )
+from helpers.stock_leaderboard import (
+    STOCK_BOARD_PAGE_SIZE,
+    build_stock_board,
+    format_stock_board_field,
+)
 from helpers import affiliation_views as av
 import helpers.autocomplete as ac
 from helpers.logging_setup import (
@@ -3956,6 +3961,234 @@ async def leaderboard_cmd(
     await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=ephemeral_test)
 
 
+def _stock_board_entries(game_id: str):
+    """Priced picks for one game, grouped for the text stock board."""
+    return build_stock_board(fe.be.list_priced_stock_picks(game_id))
+
+
+class StockLeaderboardView(discord.ui.View):
+    """Page through a text leaderboard of stocks players have picked."""
+
+    def __init__(
+        self,
+        interaction: discord.Interaction,
+        games: list[dict],
+        *,
+        show_game_controls: bool = True,
+    ):
+        super().__init__(timeout=600)
+        self.interaction = interaction
+        self.games = games
+        self.game_index = 0
+        self.page_index = 0
+        self.show_game_controls = show_game_controls
+        self._sync_buttons()
+
+    @property
+    def current_game(self) -> dict:
+        return self.games[self.game_index]
+
+    @property
+    def page_count(self) -> int:
+        count = len(self.current_game["entries"])
+        if count <= 0:
+            return 1
+        return (count + STOCK_BOARD_PAGE_SIZE - 1) // STOCK_BOARD_PAGE_SIZE
+
+    def _sync_buttons(self) -> None:
+        self.clear_items()
+        on_first_page = self.page_index <= 0
+        on_last_page = self.page_index >= self.page_count - 1
+        previous_page = discord.ui.Button(
+            label="Previous page",
+            style=discord.ButtonStyle.secondary,
+            disabled=on_first_page,
+            row=0,
+        )
+        next_page = discord.ui.Button(
+            label="Next page",
+            style=discord.ButtonStyle.secondary,
+            disabled=on_last_page,
+            row=0,
+        )
+        previous_page.callback = self._previous_page  # type: ignore[method-assign]
+        next_page.callback = self._next_page  # type: ignore[method-assign]
+        self.add_item(previous_page)
+        self.add_item(next_page)
+        if self.show_game_controls and len(self.games) > 1:
+            previous_game = discord.ui.Button(
+                label="Previous game",
+                style=discord.ButtonStyle.blurple,
+                disabled=self.game_index <= 0,
+                row=1,
+            )
+            next_game = discord.ui.Button(
+                label="Next game",
+                style=discord.ButtonStyle.blurple,
+                disabled=self.game_index >= len(self.games) - 1,
+                row=1,
+            )
+            previous_game.callback = self._previous_game  # type: ignore[method-assign]
+            next_game.callback = self._next_game  # type: ignore[method-assign]
+            self.add_item(previous_game)
+            self.add_item(next_game)
+
+    def embed(self) -> discord.Embed:
+        game = self.current_game
+        entries = game["entries"]
+        embed = discord.Embed(
+            title=f"Stock picks • {game['title']}",
+            color=discord.Color.blurple(),
+        )
+        start = self.page_index * STOCK_BOARD_PAGE_SIZE
+        page = entries[start : start + STOCK_BOARD_PAGE_SIZE]
+        if not page:
+            embed.description = "No priced stock picks in this game yet."
+        else:
+            for offset, entry in enumerate(page, start=1):
+                name, value = format_stock_board_field(entry, start + offset)
+                embed.add_field(name=name, value=value, inline=False)
+        footer = []
+        if self.show_game_controls and len(self.games) > 1:
+            footer.append(f"Game {self.game_index + 1} of {len(self.games)}")
+        footer.append(f"Page {self.page_index + 1} of {self.page_count}")
+        embed.set_footer(text=" | ".join(footer))
+        return embed
+
+    def _needs_controls(self) -> bool:
+        return self.page_count > 1 or (self.show_game_controls and len(self.games) > 1)
+
+    async def _edit(self, interaction: discord.Interaction) -> None:
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    async def _previous_page(self, interaction: discord.Interaction) -> None:
+        self.page_index = max(0, self.page_index - 1)
+        await self._edit(interaction)
+
+    async def _next_page(self, interaction: discord.Interaction) -> None:
+        self.page_index = min(self.page_count - 1, self.page_index + 1)
+        await self._edit(interaction)
+
+    async def _previous_game(self, interaction: discord.Interaction) -> None:
+        self.game_index = max(0, self.game_index - 1)
+        self.page_index = 0
+        await self._edit(interaction)
+
+    async def _next_game(self, interaction: discord.Interaction) -> None:
+        self.game_index = min(len(self.games) - 1, self.game_index + 1)
+        self.page_index = 0
+        await self._edit(interaction)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.interaction.user.id:
+            return True
+        await interaction.response.send_message("Only you can flip these pages.", ephemeral=True)
+        return False
+
+    async def on_timeout(self) -> None:
+        await _disable_expired_view(self, self.interaction)
+
+
+@bot.tree.command(
+    name="stock-leaderboard",
+    description="Rank the stocks players have picked in a game",
+)
+@app_commands.autocomplete(game_id=ac.leaderboard_games_autocomplete)
+@app_commands.describe(
+    game_id="Optional game name or ID; leave blank to browse your games",
+)
+async def stock_leaderboard_cmd(
+    interaction: discord.Interaction,
+    game_id: str | None = None,
+):
+    await interaction.response.defer(ephemeral=ephemeral_test)
+    user_id = interaction.user.id
+    if game_id:
+        try:
+            selected_game = await asyncio.to_thread(fe.be.get_game, game_id)
+        except LookupError:
+            await interaction.followup.send(
+                embed=simple_embed(
+                    status="failed",
+                    title="Game not found",
+                    desc=f"No game with ID `{game_id}` exists.",
+                ),
+                ephemeral=ephemeral_test,
+            )
+            return
+        if not await asyncio.to_thread(_user_can_view_leaderboard, selected_game, user_id):
+            await interaction.followup.send(
+                embed=simple_embed(
+                    status="failed",
+                    title="Private game",
+                    desc="You do not have access to this private game's leaderboard.",
+                ),
+                ephemeral=ephemeral_test,
+            )
+            return
+        ranked = [(selected_game, 0)]
+    else:
+        try:
+            ranked = await asyncio.to_thread(_leaderboard_browse_games, user_id)
+        except Exception as exc:
+            logger.exception("stock leaderboard failed | user=%s", user_id, exc_info=exc)
+            await interaction.followup.send(
+                embed=simple_embed(status="failed", title="Error", desc="Could not load your games."),
+                ephemeral=ephemeral_test,
+            )
+            return
+        if not ranked:
+            await interaction.followup.send(
+                embed=simple_embed(
+                    status="failed",
+                    title="No games",
+                    desc=(
+                        "There are no personal or recurring public leaderboards to browse. "
+                        "You can still enter another public game with `/stock-leaderboard game_id:`."
+                    ),
+                ),
+                ephemeral=ephemeral_test,
+            )
+            return
+
+    games: list[dict] = []
+    for game, _player_count in ranked:
+        try:
+            entries = await asyncio.to_thread(_stock_board_entries, game.id)
+        except Exception:
+            logger.exception("stock leaderboard failed to load game %s", game.id)
+            continue
+        games.append(
+            {
+                "title": f"{game.name} [{game.id}]",
+                "entries": entries,
+            }
+        )
+
+    if not games:
+        await interaction.followup.send(
+            embed=simple_embed(
+                status="failed",
+                title="No leaderboards",
+                desc="No games with stock-pick data.",
+            ),
+            ephemeral=ephemeral_test,
+        )
+        return
+
+    view = StockLeaderboardView(
+        interaction,
+        games,
+        show_game_controls=game_id is None,
+    )
+    payload = view.embed()
+    if view._needs_controls():
+        await interaction.followup.send(embed=payload, view=view, ephemeral=ephemeral_test)
+    else:
+        await interaction.followup.send(embed=payload, ephemeral=ephemeral_test)
+
+
 def _participant_for_game(user_id: int, game_id: str):
     """Return the participant row or None when the user is not in the game."""
     try:
@@ -4651,6 +4884,7 @@ def _regular_help_embed(
             "`/remove-stock` - Cancel a purchase that is still pending.\n"
             "`/my-stocks` - View your portfolio, performance, and current rank.\n"
             "`/leaderboard` - Browse rankings for your games or accessible games.\n"
+            "`/stock-leaderboard` - Rank the stocks players picked, 10 per page. Optional `game_id`.\n"
             "`/user-stats` - View your or another player's overall statistics."
         ),
         inline=False,

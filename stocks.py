@@ -1193,6 +1193,55 @@ class Backend:
         except LookupError:
             return ()
 
+    def list_priced_stock_picks(self, game_id: str) -> tuple:
+        """Owned and pending-sell picks in a game that already have a percent change."""
+        from helpers.stock_leaderboard import PricedPick
+
+        query = """
+        WHERE game_participants.game_id = ?
+        AND game_participants.status = "active"
+        AND stock_picks.status IN ("owned", "pending_sell")
+        AND stock_picks.change_percent IS NOT NULL
+        """
+        resp = self.sql.get(
+            table="stock_picks",
+            columns=[
+                "stocks.ticker",
+                "stocks.company_name",
+                "stock_picks.change_percent",
+                "game_participants.user_id",
+                "game_participants.affiliation",
+            ],
+            left_join=(
+                "LEFT JOIN stocks ON stocks.stock_id = stock_picks.stock_id "
+                "LEFT JOIN game_participants ON "
+                "game_participants.participation_id = stock_picks.participation_id"
+            ),
+            filters=(query, [str(game_id)]),
+        )
+        if resp.reason == "NO ROWS RETURNED":
+            return ()
+        if resp.status != "success" or not isinstance(resp.result, tuple):
+            raise Exception("Failed to list priced stock picks.", resp)
+        picks: list[PricedPick] = []
+        for item in resp.result:
+            ticker = item.get("ticker")
+            percent = item.get("change_percent")
+            user_id = item.get("user_id")
+            if not ticker or percent is None or user_id is None:
+                continue
+            company = item.get("company_name")
+            picks.append(
+                PricedPick(
+                    ticker=str(ticker),
+                    company_name=str(company) if company else None,
+                    change_percent=float(percent),
+                    user_id=int(user_id),
+                    affiliation=item.get("affiliation"),
+                )
+            )
+        return tuple(picks)
+
     def update_stock_pick(self, pick_id:int, current_value:Optional[float]=None, shares:Optional[float]=None, start_value:Optional[float]=None, status:Optional[str]=None, change_dollars:Optional[float]=None, change_percent:Optional[float]=None, event_label:Optional[str]=None, stock_id:Optional[int]=None): #Update a single stock pick
         """Update a stock pick
 
