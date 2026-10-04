@@ -4155,7 +4155,7 @@ async def stock_leaderboard_cmd(
     games: list[dict] = []
     for game, _player_count in ranked:
         try:
-            entries = await asyncio.to_thread(_stock_board_entries, game.id)
+            entries = await asyncio.to_thread(_stock_board_entries, str(game.id))
         except Exception:
             logger.exception("stock leaderboard failed to load game %s", game.id)
             continue
