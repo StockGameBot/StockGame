@@ -26,6 +26,21 @@ load_dotenv()
 
 version = "???" #TODO should frontend and backend have different versions?
 
+
+def _coerce_discord_user_id(value: Any) -> int:
+    """Normalize a Discord snowflake from SQLite (int, str, or float)."""
+    if isinstance(value, bool):
+        raise ValueError(f"Invalid Discord user id: {value!r}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        raise ValueError("Empty Discord user id")
+    return int(text)
+
+
 class Backend:
     # Raise Exceptions if bad data is passed in
     # Most of these expect that the data being sent has been checked or otherwise verified.  End users should not interact directly with this
@@ -1227,8 +1242,8 @@ class Backend:
         for item in resp.result:
             ticker = item.get("ticker")
             percent = item.get("change_percent")
-            user_id = item.get("user_id")
-            if not ticker or percent is None or user_id is None:
+            raw_user_id = item.get("user_id")
+            if not ticker or percent is None or raw_user_id is None:
                 continue
             company = item.get("company_name")
             picks.append(
@@ -1236,7 +1251,7 @@ class Backend:
                     ticker=str(ticker),
                     company_name=str(company) if company else None,
                     change_percent=float(percent),
-                    user_id=int(user_id),
+                    user_id=_coerce_discord_user_id(raw_user_id),
                     affiliation=item.get("affiliation"),
                 )
             )

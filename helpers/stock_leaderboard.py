@@ -75,11 +75,16 @@ def build_stock_board(picks: list[PricedPick] | tuple[PricedPick, ...]) -> list[
     return entries
 
 
-def format_stock_board_field(entry: StockBoardEntry, rank: int) -> tuple[str, str]:
+def format_stock_board_field(
+    entry: StockBoardEntry,
+    rank: int,
+    *,
+    picker_labels: dict[int, str] | None = None,
+) -> tuple[str, str]:
     """Return the embed field name and value for one board row."""
     percent = _format_percent_span(entry.low_percent, entry.high_percent)
     name = _fit_field_name(rank, entry.ticker, entry.company_name, percent)
-    detail = _picked_by_line(entry)
+    detail = _picked_by_line(entry, picker_labels=picker_labels)
     return name, detail
 
 
@@ -125,10 +130,23 @@ def _fit_field_name(rank: int, ticker: str, company: str | None, percent: str) -
     return text[:_FIELD_NAME_LIMIT]
 
 
-def _picked_by_line(entry: StockBoardEntry) -> str:
+def _picker_display(user_id: int, picker_labels: dict[int, str] | None) -> str:
+    if picker_labels and user_id in picker_labels:
+        return picker_labels[user_id]
+    return f"<@{user_id}>"
+
+
+def _picked_by_line(
+    entry: StockBoardEntry,
+    *,
+    picker_labels: dict[int, str] | None = None,
+) -> str:
     fund = None if entry.grouped else fund_label(entry.holders[0][1])
     suffix = f" Fund: {fund}" if fund else ""
-    mentions = [f"<@{user_id}>" for user_id, _affiliation in entry.holders]
+    mentions = [
+        _picker_display(user_id, picker_labels)
+        for user_id, _affiliation in entry.holders
+    ]
     line = "Picked by: " + " ".join(mentions) + suffix
     if len(line) <= _FIELD_VALUE_LIMIT:
         return line

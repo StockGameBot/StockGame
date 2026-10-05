@@ -57,6 +57,16 @@ def test_gap_over_half_a_point_stays_separate_and_keeps_fund():
     assert top_value == "Picked by: <@22> Fund: Independent"
 
 
+def test_picker_labels_override_raw_mentions():
+    board = build_stock_board([_pick("AAPL", 10.0, 11, AFFILIATION_ATRIOC)])
+    _name, value = format_stock_board_field(
+        board[0],
+        1,
+        picker_labels={11: "@Alice"},
+    )
+    assert value == "Picked by: @Alice Fund: Atrioc"
+
+
 def test_exact_half_point_gap_stays_in_the_chain():
     board = build_stock_board(
         [
