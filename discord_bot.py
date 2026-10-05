@@ -3999,6 +3999,12 @@ class StockLeaderboardView(discord.ui.View):
         self.clear_items()
         on_first_page = self.page_index <= 0
         on_last_page = self.page_index >= self.page_count - 1
+        first_page = discord.ui.Button(
+            label="First page",
+            style=discord.ButtonStyle.secondary,
+            disabled=on_first_page,
+            row=0,
+        )
         previous_page = discord.ui.Button(
             label="Previous page",
             style=discord.ButtonStyle.secondary,
@@ -4011,10 +4017,20 @@ class StockLeaderboardView(discord.ui.View):
             disabled=on_last_page,
             row=0,
         )
+        last_page = discord.ui.Button(
+            label="Last page",
+            style=discord.ButtonStyle.secondary,
+            disabled=on_last_page,
+            row=0,
+        )
+        first_page.callback = self._first_page  # type: ignore[method-assign]
         previous_page.callback = self._previous_page  # type: ignore[method-assign]
         next_page.callback = self._next_page  # type: ignore[method-assign]
+        last_page.callback = self._last_page  # type: ignore[method-assign]
+        self.add_item(first_page)
         self.add_item(previous_page)
         self.add_item(next_page)
+        self.add_item(last_page)
         if self.show_game_controls and len(self.games) > 1:
             previous_game = discord.ui.Button(
                 label="Previous game",
@@ -4062,12 +4078,20 @@ class StockLeaderboardView(discord.ui.View):
         self._sync_buttons()
         await interaction.response.edit_message(embed=self.embed(), view=self)
 
+    async def _first_page(self, interaction: discord.Interaction) -> None:
+        self.page_index = 0
+        await self._edit(interaction)
+
     async def _previous_page(self, interaction: discord.Interaction) -> None:
         self.page_index = max(0, self.page_index - 1)
         await self._edit(interaction)
 
     async def _next_page(self, interaction: discord.Interaction) -> None:
         self.page_index = min(self.page_count - 1, self.page_index + 1)
+        await self._edit(interaction)
+
+    async def _last_page(self, interaction: discord.Interaction) -> None:
+        self.page_index = max(0, self.page_count - 1)
         await self._edit(interaction)
 
     async def _previous_game(self, interaction: discord.Interaction) -> None:
