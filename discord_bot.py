@@ -3439,6 +3439,56 @@ class UserLeaderboardView(discord.ui.View):
         await _disable_expired_view(self, self.interaction)
 
 
+async def _resolve_picker_labels(
+    guild: discord.Guild | None,
+    user_ids: set[int],
+) -> dict[int, str]:
+    """Map Discord user IDs to mention strings or readable names for embed fields."""
+    labels: dict[int, str] = {}
+    for user_id in sorted(user_ids):
+        member: discord.Member | None = None
+        if guild is not None:
+            member = guild.get_member(user_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(user_id)
+                except discord.HTTPException:
+                    member = None
+        if member is not None:
+            labels[user_id] = member.mention
+            continue
+        labels[user_id] = await resolve_player_name(user_id, guild)
+    return labels
+
+
+def _stock_board_user_ids(games: list[dict]) -> set[int]:
+    user_ids: set[int] = set()
+    for game in games:
+        for entry in game.get("entries", ()):
+            for user_id, _affiliation in entry.holders:
+                user_ids.add(user_id)
+    return user_ids
+
+
+def _stock_board_page_user_ids(
+    games: list[dict],
+    game_index: int,
+    page_index: int,
+) -> list[int]:
+    entries = games[game_index].get("entries", ())
+    start = page_index * STOCK_BOARD_PAGE_SIZE
+    page = entries[start : start + STOCK_BOARD_PAGE_SIZE]
+    user_ids: list[int] = []
+    seen: set[int] = set()
+    for entry in page:
+        for user_id, _affiliation in entry.holders:
+            if user_id in seen:
+                continue
+            seen.add(user_id)
+            user_ids.append(user_id)
+    return user_ids
+
+
 async def resolve_player_name(user_id: int, guild: discord.Guild | None) -> str:
     """Live Discord name for leaderboard rows (guild nickname preferred).
 
@@ -3975,6 +4025,7 @@ class StockLeaderboardView(discord.ui.View):
         games: list[dict],
         *,
         show_game_controls: bool = True,
+        picker_labels: dict[int, str] | None = None,
     ):
         super().__init__(timeout=600)
         self.interaction = interaction
@@ -3982,6 +4033,7 @@ class StockLeaderboardView(discord.ui.View):
         self.game_index = 0
         self.page_index = 0
         self.show_game_controls = show_game_controls
+        self.picker_labels = picker_labels or {}
         self._sync_buttons()
 
     @property
@@ -4062,7 +4114,11 @@ class StockLeaderboardView(discord.ui.View):
             embed.description = "No priced stock picks in this game yet."
         else:
             for offset, entry in enumerate(page, start=1):
-                name, value = format_stock_board_field(entry, start + offset)
+                name, value = format_stock_board_field(
+                    entry,
+                    start + offset,
+                    picker_labels=self.picker_labels,
+                )
                 embed.add_field(name=name, value=value, inline=False)
         footer = []
         if self.show_game_controls and len(self.games) > 1:
@@ -4074,9 +4130,25 @@ class StockLeaderboardView(discord.ui.View):
     def _needs_controls(self) -> bool:
         return self.page_count > 1 or (self.show_game_controls and len(self.games) > 1)
 
+    def _allowed_mentions(self) -> discord.AllowedMentions:
+        user_ids = _stock_board_page_user_ids(
+            self.games,
+            self.game_index,
+            self.page_index,
+        )
+        return discord.AllowedMentions(
+            users=[discord.Object(id=uid) for uid in user_ids],
+            roles=False,
+            everyone=False,
+        )
+
     async def _edit(self, interaction: discord.Interaction) -> None:
         self._sync_buttons()
-        await interaction.response.edit_message(embed=self.embed(), view=self)
+        await interaction.response.edit_message(
+            embed=self.embed(),
+            view=self,
+            allowed_mentions=self._allowed_mentions(),
+        )
 
     async def _first_page(self, interaction: discord.Interaction) -> None:
         self.page_index = 0
@@ -4201,16 +4273,31 @@ async def stock_leaderboard_cmd(
         )
         return
 
+    picker_labels = await _resolve_picker_labels(
+        interaction.guild,
+        _stock_board_user_ids(games),
+    )
     view = StockLeaderboardView(
         interaction,
         games,
         show_game_controls=game_id is None,
+        picker_labels=picker_labels,
     )
     payload = view.embed()
+    allowed = view._allowed_mentions()
     if view._needs_controls():
-        await interaction.followup.send(embed=payload, view=view, ephemeral=ephemeral_test)
+        await interaction.followup.send(
+            embed=payload,
+            view=view,
+            ephemeral=ephemeral_test,
+            allowed_mentions=allowed,
+        )
     else:
-        await interaction.followup.send(embed=payload, ephemeral=ephemeral_test)
+        await interaction.followup.send(
+            embed=payload,
+            ephemeral=ephemeral_test,
+            allowed_mentions=allowed,
+        )
 
 
 def _participant_for_game(user_id: int, game_id: str):
