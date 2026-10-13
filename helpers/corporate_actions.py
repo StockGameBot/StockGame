@@ -167,23 +167,77 @@ def summarize_corporate_actions_for_date(
     return alpaca.fetch_corporate_actions_for_date(trade_date)
 
 
-def _owned_picks_for_stock(be: "Backend", stock_id: int) -> list[Any]:
+def _ca_eligible_game_ids_subquery() -> str:
+    """Games that should receive corporate actions (active or started-but-still-open)."""
+    return """
+        SELECT game_id FROM games
+        WHERE (
+            status = "active"
+            OR (status = "open" AND start_date <= ?)
+        )
+        AND (end_date IS NULL OR end_date >= ?)
+    """
+
+
+def _owned_picks_for_stock(
+    be: "Backend",
+    stock_id: int,
+    *,
+    trade_date: date,
+) -> list[Any]:
     import helpers.datatype_validation as dtv
 
-    query = """
+    as_of = trade_date.isoformat()
+    query = f"""
     WHERE status IN ("owned", "pending_sell")
     AND stock_id = ?
     AND participation_id IN (
         SELECT participation_id FROM game_participants
         WHERE status = "active"
-        AND game_id IN (SELECT game_id FROM games WHERE status = "active")
+        AND game_id IN ({_ca_eligible_game_ids_subquery()})
+    )
+    """
+    try:
+        resp = be.sql.get(
+            table="stock_picks",
+            filters=(query, [stock_id, as_of, as_of]),
+        )
+        return list(be._many_get(typeadapter=dtv.StockPicks, resp=resp))
+    except LookupError:
+        return []
+
+
+def _log_unscoped_split_picks(
+    be: "Backend",
+    stock_id: int,
+    ticker: str,
+    *,
+    trade_date: date,
+) -> None:
+    """Warn when picks exist but none matched the active-game CA filter."""
+    import helpers.datatype_validation as dtv
+
+    query = """
+    WHERE stock_id = ?
+    AND status IN ("owned", "pending_sell")
+    AND participation_id IN (
+        SELECT participation_id FROM game_participants WHERE status = "active"
     )
     """
     try:
         resp = be.sql.get(table="stock_picks", filters=(query, [stock_id]))
-        return list(be._many_get(typeadapter=dtv.StockPicks, resp=resp))
+        rows = be._many_get(typeadapter=dtv.StockPicks, resp=resp)
     except LookupError:
-        return []
+        return
+    if not rows:
+        return
+    logger.warning(
+        "CA staging: %s has %s owned/pending_sell pick(s) for active players "
+        "but 0 in CA-eligible games on %s (game status or end_date?)",
+        ticker,
+        len(rows),
+        trade_date.isoformat(),
+    )
 
 
 def stage_corporate_actions(
@@ -245,7 +299,7 @@ def stage_corporate_actions(
                 "ex_date": ex_date.isoformat() if ex_date else None,
             }
         )
-        picks = _owned_picks_for_stock(be, stock.id)
+        picks = _owned_picks_for_stock(be, stock.id, trade_date=trade_date)
         eligible = [
             p for p in picks
             if _pick_should_receive_split(
@@ -266,6 +320,10 @@ def stage_corporate_actions(
             report.picks_staged += 1
         report.splits += 1
         report.split_symbols.append(to_db_ticker(str(symbol)))
+        if len(picks) == 0:
+            _log_unscoped_split_picks(
+                be, stock.id, to_db_ticker(str(symbol)), trade_date=trade_date,
+            )
         logger.info(
             "CA staging: %s %s (ca_id=%s) eligible_picks=%s/%s",
             split_type,
@@ -299,7 +357,7 @@ def stage_corporate_actions(
                 "ex_date": ex_date.isoformat() if ex_date else None,
             }
         )
-        picks = _owned_picks_for_stock(be, stock.id)
+        picks = _owned_picks_for_stock(be, stock.id, trade_date=trade_date)
         eligible = [
             p for p in picks
             if _pick_should_receive_split(
@@ -320,6 +378,10 @@ def stage_corporate_actions(
             report.picks_staged += 1
         report.splits += 1
         report.split_symbols.append(to_db_ticker(str(symbol)))
+        if len(picks) == 0:
+            _log_unscoped_split_picks(
+                be, stock.id, to_db_ticker(str(symbol)), trade_date=trade_date,
+            )
         logger.info(
             "CA staging: %s %s (ca_id=%s) eligible_picks=%s/%s",
             split_type,
@@ -355,7 +417,7 @@ def stage_corporate_actions(
             trade_date=date_str,
             datetime_staged=now,
         )
-        for pick in _owned_picks_for_stock(be, stock.id):
+        for pick in _owned_picks_for_stock(be, stock.id, trade_date=trade_date):
             be.insert_staged_corporate_action(
                 alpaca_ca_id=f"{ca_id}:pick:{pick.id}",
                 action_type="name_change_pick",
@@ -378,7 +440,7 @@ def stage_corporate_actions(
         if stock is None:
             continue
         payload = json.dumps({"badge": format_delist_badge()})
-        picks = _owned_picks_for_stock(be, stock.id)
+        picks = _owned_picks_for_stock(be, stock.id, trade_date=trade_date)
         for pick in picks:
             be.insert_staged_corporate_action(
                 alpaca_ca_id=str(ca_id),
@@ -412,7 +474,7 @@ def stage_corporate_actions(
             else:
                 badge = format_stock_merger_badge(str(acquiree), str(acquirer))
             payload = json.dumps({**item, "badge": badge, "action_type": action_type})
-            picks = _owned_picks_for_stock(be, stock.id)
+            picks = _owned_picks_for_stock(be, stock.id, trade_date=trade_date)
             for pick in picks:
                 be.insert_staged_corporate_action(
                     alpaca_ca_id=str(ca_id),

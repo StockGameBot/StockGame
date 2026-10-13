@@ -302,6 +302,45 @@ def test_apply_cash_merger_freezes_value(be, mocker):
     assert be.get_stock(stock.id).trade_status == "merged"
 
 
+def test_stage_corporate_actions_includes_owned_pick_in_open_started_game(be, mocker):
+    be.add_stock("NXGL", "nasdaq", "Nexgel")
+    stock = be.get_stock("NXGL")
+    be.add_user(1, "discord", "player")
+    game_id = be.add_game(1, "G", "2026-10-01", starting_money=1000, total_picks=1)
+    be.add_participant(1, game_id, force_active=True)
+    participant = be.get_many_participants(user_id=1, game_id=game_id)[0]
+    be.add_stock_pick(participant.id, stock.id)
+    picks = be.get_many_stock_picks(participant_id=participant.id)
+    be.update_stock_pick(
+        pick_id=picks[0].id,
+        shares=100.0,
+        start_value=1000.0,
+        current_value=1000.0,
+        status="owned",
+    )
+    trade_date = date(2026, 10, 12)
+
+    class FakeAlpaca:
+        configured = True
+
+        def fetch_corporate_actions_for_date(self, _date):
+            return {
+                "reverse_splits": [
+                    {
+                        "id": "ca-nxgl",
+                        "symbol": "NXGL",
+                        "old_rate": 10,
+                        "new_rate": 1,
+                        "ex_date": "2026-10-12",
+                    }
+                ]
+            }
+
+    report = ca.stage_corporate_actions(be, FakeAlpaca(), trade_date, force_if_empty=True)
+    assert report.splits == 1
+    assert report.picks_staged == 1
+
+
 def test_stage_corporate_actions_skips_pending_buy(be, mocker):
     be.add_stock("SPLT", "nasdaq", "Split Co")
     stock = be.get_stock("SPLT")

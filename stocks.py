@@ -2213,17 +2213,20 @@ class GameLogic: # Might move some of the control/running actions here
         maybe_daily_backup(self.be.sql.db)
         maybe_hourly_backup(self.be.sql.db)
 
+        if game_id is None:
+            self.recurring_games()
+        self.update_game_statuses(game_id=game_id)
+
         if kind == 'pre_open' and self._is_weekday_et():
             ca.stage_corporate_actions(
                 self.be, self.alpaca, trade_date, force_if_empty=True
             )
 
-        if game_id is None:
-            self.recurring_games()
-        self.update_game_statuses(game_id=game_id)
-
         prices: dict[str, float] = {}
         if apply_corporate_actions and self._is_weekday_et():
+            ca.stage_corporate_actions(
+                self.be, self.alpaca, trade_date, force_if_empty=True
+            )
             pre = ca.apply_staged_corporate_actions(
                 self.be, self, trade_date, prices, phase='pre_price'
             )
