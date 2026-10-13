@@ -83,10 +83,42 @@ def test_plan_and_apply_records_marker_once(be):
     assert apply_plans(be, plans) == 0
 
 
-def test_plan_skips_wrong_alpaca_ca_id(be):
+def test_plan_uses_alpaca_ca_id_when_log_id_differs(be):
+    owner_id = 502
+    be.add_user(owner_id, "testing")
+    game_id = be.add_game(
+        user_id=owner_id,
+        name="SplitRepair2",
+        start_date="2026-10-01",
+        starting_money=10_000,
+        total_picks=2,
+    )
+    be.update_game(game_id, status="active")
+    be.add_participant(owner_id, game_id)
+    participant = be.get_many_participants(user_id=owner_id, game_id=game_id)[0]
     be.add_stock("NXGL", "NASDAQ", "Nexgel")
+    stock = be.get_stock("NXGL")
+    be.add_stock_pick(participant.id, stock.id)
+    pick = be.get_many_stock_picks(participant_id=participant.id)[0]
+    be.update_stock_pick(
+        pick_id=pick.id,
+        shares=50.0,
+        start_value=1000.0,
+        current_value=1000.0,
+        status="owned",
+    )
     bad = _ca_payload("NXGL", old_rate=10, new_rate=1)
     bad["reverse_splits"][0]["id"] = "wrong-id"
+    bad["reverse_splits"].append(
+        {
+            "id": EXPECTED_CA_IDS["NIVF"],
+            "symbol": "NIVF",
+            "old_rate": 20,
+            "new_rate": 1,
+            "ex_date": TRADE_DATE.isoformat(),
+        }
+    )
     plans, warnings = plan_missed_split_repairs(be, bad)
-    assert plans == []
+    assert len(plans) == 1
+    assert plans[0].ca_id == "wrong-id"
     assert any("ca_id" in w for w in warnings)
