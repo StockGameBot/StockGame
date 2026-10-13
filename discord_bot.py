@@ -452,6 +452,7 @@ async def scheduled_ca_staging():
     if not is_weekday_et():
         return
     try:
+        await asyncio.to_thread(fe.gl.update_game_statuses)
         await asyncio.to_thread(
             ca.stage_corporate_actions,
             fe.be,
