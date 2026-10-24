@@ -76,6 +76,22 @@ def format_split_badge(old_rate: float, new_rate: float, split_type: str) -> str
     return f"{num}:{den} Split"
 
 
+EVENT_LABEL_SPLIT_SEP = " · "
+
+
+def merge_event_label(existing: str | None, new_badge: str) -> str:
+    """Append a corporate-action badge without dropping prior split labels."""
+    prior = (existing or "").strip()
+    badge = new_badge.strip()
+    if not prior:
+        return badge
+    if not badge or badge in prior:
+        return prior
+    if badge in prior.split(EVENT_LABEL_SPLIT_SEP):
+        return prior
+    return f"{prior}{EVENT_LABEL_SPLIT_SEP}{badge}"
+
+
 def format_rename_badge(old_symbol: str) -> str:
     return f"Renamed from {to_db_ticker(old_symbol)}"
 
@@ -144,12 +160,13 @@ def _pick_should_receive_split(
     *,
     ex_date: Optional[date] = None,
 ) -> bool:
-    """Skip picks bought on/after ex-date or already badged (post-split buys)."""
+    """Skip picks bought on/after this split's ex-date.
+
+    Multiple splits on the same pre-split pick are allowed; idempotency is per
+    ``{alpaca_ca_id}:pick:{pick_id}`` at apply time.
+    """
     if share_factor >= 1:
         return True
-    label = getattr(pick, "event_label", None)
-    if isinstance(label, str) and "Split" in label:
-        return False
     created = _parse_pick_created_date(pick)
     effective = ex_date or trade_date
     if created is not None and created >= effective:
@@ -592,7 +609,7 @@ def apply_staged_corporate_actions(
             be.update_stock_pick(
                 pick_id=pick.id,
                 shares=new_shares,
-                event_label=badge,
+                event_label=merge_event_label(getattr(pick, "event_label", None), badge),
             )
             stock = be.get_stock(int(row["stock_id"]))
             report.split_tickers.add(stock.ticker.upper())

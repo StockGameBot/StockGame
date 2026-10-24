@@ -472,3 +472,103 @@ def test_stage_corporate_actions_skips_post_ex_date_owned_pick(be, mocker):
     assert report.split_symbols == ["IMCC"]
     assert report.picks_staged == 0
 
+
+def test_merge_event_label_appends_splits():
+    first = ca.format_split_badge(4, 1, "reverse_split")
+    second = ca.format_split_badge(8, 1, "reverse_split")
+    merged = ca.merge_event_label(first, second)
+    assert merged == f"{first}{ca.EVENT_LABEL_SPLIT_SEP}{second}"
+    assert ca.merge_event_label(merged, second) == merged
+
+
+def test_pick_with_split_badge_still_eligible_for_later_split():
+    from types import SimpleNamespace
+
+    pick = SimpleNamespace(
+        datetime_created="2026-10-01 12:00:00",
+        event_label="1:4 Reverse Split",
+        shares=1000.0,
+        start_value=1000.0,
+    )
+    assert ca._pick_should_receive_split(
+        pick,
+        date(2026, 10, 23),
+        1 / 8,
+        ex_date=date(2026, 10, 23),
+    )
+
+
+def test_second_reverse_split_same_month_stages_and_applies(be, mocker):
+    from stocks import GameLogic
+
+    logic = GameLogic(be.sql.db)
+    be.add_stock("NIVF", "nasdaq", "NewGenIvf")
+    stock = be.get_stock("NIVF")
+    be.add_user(1, "discord", "player")
+    game_id = be.add_game(1, "G", "2026-10-01", starting_money=1000, total_picks=1)
+    be.update_game(game_id, status="active")
+    be.add_participant(1, game_id, force_active=True)
+    participant = be.get_many_participants(user_id=1, game_id=game_id)[0]
+    be.add_stock_pick(participant.id, stock.id)
+    picks = be.get_many_stock_picks(participant_id=participant.id)
+    be.update_stock_pick(
+        pick_id=picks[0].id,
+        shares=8000.0,
+        start_value=1000.0,
+        current_value=1000.0,
+        status="owned",
+    )
+
+    badge1 = ca.format_split_badge(4, 1, "reverse_split")
+    trade1 = date(2026, 10, 12)
+    be.insert_staged_corporate_action(
+        alpaca_ca_id="ca-nivf-oct12",
+        action_type="reverse_split",
+        stock_id=stock.id,
+        pick_id=picks[0].id,
+        share_factor=0.25,
+        payload='{"badge": "' + badge1 + '", "ex_date": "2026-10-12"}',
+        trade_date=trade1.isoformat(),
+        datetime_staged="2026-10-12 09:00:00",
+    )
+    ca.apply_staged_corporate_actions(be, logic, trade1, {}, phase="pre_price")
+    after_first = be.get_stock_pick(picks[0].id)
+    assert after_first.shares == pytest.approx(2000.0)
+    assert after_first.event_label == badge1
+
+    class FakeAlpaca:
+        configured = True
+
+        def fetch_corporate_actions_for_date(self, d):
+            if d == date(2026, 10, 23):
+                return {
+                    "reverse_splits": [
+                        {
+                            "id": "ca-nivf-oct23",
+                            "symbol": "NIVF",
+                            "old_rate": 8,
+                            "new_rate": 1,
+                            "ex_date": "2026-10-23",
+                        }
+                    ]
+                }
+            return {}
+
+    report = ca.stage_corporate_actions(
+        be, FakeAlpaca(), date(2026, 10, 23), force_if_empty=True,
+    )
+    assert report.picks_staged == 1
+
+    trade2 = date(2026, 10, 23)
+    apply_report = ca.apply_staged_corporate_actions(
+        be, logic, trade2, {}, phase="pre_price",
+    )
+    assert apply_report.applied == 1
+    after_second = be.get_stock_pick(picks[0].id)
+    assert after_second.shares == pytest.approx(250.0)
+    badge2 = ca.format_split_badge(8, 1, "reverse_split")
+    assert badge2 in after_second.event_label
+    assert badge1 in after_second.event_label
+    assert be.is_corporate_action_applied(f"ca-nivf-oct12:pick:{picks[0].id}")
+    assert be.is_corporate_action_applied(f"ca-nivf-oct23:pick:{picks[0].id}")
+

@@ -1,5 +1,8 @@
 from types import SimpleNamespace
 
+from PIL import Image, ImageDraw
+
+from helpers import corporate_actions as ca
 from helpers.views import StockPortfolioImageGenerator, create_portfolio_image
 
 
@@ -76,3 +79,16 @@ def test_portfolio_image_renders_with_company_names():
     )
 
     assert image.read(8) == b"\x89PNG\r\n\x1a\n"
+
+
+def test_portfolio_multi_split_badge_label_not_empty():
+    generator = StockPortfolioImageGenerator()
+    img = Image.new("RGB", (800, 40), "white")
+    draw = ImageDraw.Draw(img)
+    first = ca.format_split_badge(4, 1, "reverse_split")
+    second = ca.format_split_badge(8, 1, "reverse_split")
+    merged = ca.merge_event_label(first, second)
+    label, max_w = generator._portfolio_event_badge_label(draw, merged, inner_width=600)
+    assert label
+    assert max_w >= 120
+    assert "1:4" in label or "2 splits" in label

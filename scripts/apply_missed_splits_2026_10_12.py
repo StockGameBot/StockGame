@@ -2,7 +2,7 @@
 """Apply NXGL and NIVF reverse splits missed on 2026-10-12 (staging found 0 picks).
 
 Uses a broader pick search than daily CA staging (any active participant, any game
-status). Skips only picks already badged/applied or without shares.
+status). Skips only picks already applied (per-pick CA key) or without shares.
 
 Idempotent:
   - Exits without changes if ``manual-repair:missed-splits-2026-10-12`` is already in
@@ -30,7 +30,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dotenv import load_dotenv
 
 from helpers.alpaca_client import AlpacaMarketData, to_db_ticker
-from helpers.corporate_actions import format_split_badge, summarize_corporate_actions_for_date
+from helpers.corporate_actions import (
+    format_split_badge,
+    merge_event_label,
+    summarize_corporate_actions_for_date,
+)
 from stocks import Backend, GameLogic
 
 TRADE_DATE = date(2026, 10, 12)
@@ -142,9 +146,6 @@ def _repair_skip_reason(
 ) -> str | None:
     if be.is_corporate_action_applied(applied_key):
         return "already_applied"
-    label = getattr(pick, "event_label", None)
-    if isinstance(label, str) and "Reverse Split" in label:
-        return "already_badged"
     shares = getattr(pick, "shares", None)
     if shares is None or float(shares) <= 0:
         return "no_shares"
@@ -290,7 +291,7 @@ def apply_plans(be: Backend, plans: list[SplitRepairPlan]) -> int:
         be.update_stock_pick(
             pick_id=plan.pick_id,
             shares=plan.new_shares,
-            event_label=plan.badge,
+            event_label=merge_event_label(getattr(pick, "event_label", None), plan.badge),
         )
         be.record_applied_corporate_action(
             plan.applied_key,
