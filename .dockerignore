@@ -45,3 +45,7 @@ changelog.md
 
 # Keep compose/example env available to docs consumers; .env itself stays ignored.
 !.env.example
+
+data/
+logs/
+**/*.db
