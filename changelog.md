@@ -13,6 +13,7 @@ SQLite schema versions match `db_schema.db_ver`. **Beta** began with [PR #162](h
 - `scripts/revert_imcc_repair.py` — manually undo the IMCC 1:30 startup repair (dry-run by default)
 - `scripts/list_corporate_actions.py` — print Alpaca corporate actions for a given date
 - `scripts/apply_missed_splits_2026_10_12.py` — one-off NXGL/NIVF reverse splits for 2026-10-12 (DB marker + per-pick applied keys; broad pick search + diagnostics when empty)
+- `scripts/apply_missed_split_nivf_2026_10_23.py` — one-off NIVF 1:8 reverse split for 2026-10-23 (includes picks already badged from Oct 12)
 - `/stock-leaderboard` lists priced stock picks as text, 10 per page. Same-ticker picks within 0.5 percentage points share one row and drop the fund label
 
 ### Changed
@@ -29,6 +30,7 @@ SQLite schema versions match `db_schema.db_ver`. **Beta** began with [PR #162](h
 - Removed automatic one-time repairs on bot startup (IMCC split repair, LWFN6 end-date fix); use manual scripts instead
 - Corporate-action splits skip picks bought on/after Alpaca `ex_date` so post-split purchases are not divided again; staging logs split symbols
 - Corporate-action staging runs after game status refresh, includes started `open` games, re-stages at 9:30 before apply, and warns when owned picks exist but no game matched
+- Multiple reverse splits on the same pick: later splits stage and apply again (per CA id); portfolio badges accumulate (`1:4 · 1:8`) with wider layout on `/my-stocks`
 
 ## [1.0.0] - 2026-08-30
 

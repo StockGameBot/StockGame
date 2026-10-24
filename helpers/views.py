@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 
 from helpers.affiliations import format_dollar_gain
+from helpers.corporate_actions import EVENT_LABEL_SPLIT_SEP
 
 if TYPE_CHECKING:
     from helpers.datatype_validation import GameInfo
@@ -746,6 +747,38 @@ class StockPortfolioImageGenerator:
             return None
         return name
 
+    def _portfolio_event_badge_label(
+        self,
+        draw: ImageDraw.ImageDraw,
+        event_label: str,
+        inner_width: int,
+    ) -> tuple[str, int]:
+        """Return display text and max pixel width for a portfolio event badge."""
+        parts = [p.strip() for p in event_label.split(EVENT_LABEL_SPLIT_SEP) if p.strip()]
+        multi = len(parts) > 1
+        max_badge_inner = max(inner_width // 2, 120) if multi else max(inner_width // 3, 80)
+        badge_label = self._truncate_to_width(
+            draw, event_label, self.fonts["text"], max_badge_inner,
+        )
+        if multi and EVENT_LABEL_SPLIT_SEP not in badge_label:
+            second_hint = parts[-1][:12]
+            if second_hint and second_hint not in badge_label:
+                compact = f"{len(parts)} splits{EVENT_LABEL_SPLIT_SEP}"
+                compact_w = self._text_size(draw, compact, self.fonts["text"])[0]
+                rest = self._truncate_to_width(
+                    draw,
+                    event_label,
+                    self.fonts["text"],
+                    max(max_badge_inner - compact_w, 40),
+                )
+                badge_label = self._truncate_to_width(
+                    draw,
+                    f"{compact}{rest}",
+                    self.fonts["text"],
+                    max_badge_inner,
+                )
+        return badge_label, max_badge_inner
+
     def _truncate_to_width(
         self,
         draw: ImageDraw.ImageDraw,
@@ -838,11 +871,11 @@ class StockPortfolioImageGenerator:
         badge_w = 0
         badge_label = ""
         if event_label:
-            badge_label = self._truncate_to_width(
-                draw, event_label, self.fonts["text"], max(inner_width // 3, 80)
+            badge_label, max_badge_inner = self._portfolio_event_badge_label(
+                draw, event_label, inner_width,
             )
             badge_w = self._text_size(draw, badge_label, self.fonts["text"])[0] + pad_x * 2
-            badge_w = min(max(badge_w, 60), inner_width // 2)
+            badge_w = min(max(badge_w, 60), max_badge_inner + pad_x * 2)
 
         if company:
             max_ticker_inner = min(120, inner_width // 3)
